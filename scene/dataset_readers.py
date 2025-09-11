@@ -433,7 +433,7 @@ def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, 
     elif "mipnerf360" in path:
         ply_path = os.path.join(path, "points3D.ply")
     else:
-        ply_path = os.path.join(path, "sparse/0/points3D.ply")
+        ply_path = os.path.join(path, "sparse/0/points3D_corr.ply")
     # bin_path = os.path.join(path, "sparse/0/points3D.bin")
     # txt_path = os.path.join(path, "sparse/0/points3D.txt")
     

@@ -19,6 +19,10 @@ datasets/*
 comparison_results
 Grounded-SAM-2
 output*
+waymo_example*
 # *.sh
 demo
 mesh
+
+
+Chen et al. - 2025 - OMNIRE OMNI URBAN SCENE RECONSTRUCTION.pdf

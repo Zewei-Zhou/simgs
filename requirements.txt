@@ -1,0 +1,15 @@
+plyfile
+tensorboard
+tqdm
+einops
+imageio
+matplotlib
+kornia
+wandb
+lpips
+laspy
+jaxtyping
+colorama
+opencv-python
+scikit-learn
+#git+https://github.com/RuijieZhu94/gsplat-object.git

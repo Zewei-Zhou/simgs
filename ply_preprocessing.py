@@ -1,10 +1,12 @@
 import struct
 import numpy as np
 import cv2
-from collections import Counter
-from collections import defaultdict
+from collections import Counter, defaultdict
 from plyfile import PlyData, PlyElement
-from scene.colmap_loader import read_intrinsics_binary, read_extrinsics_binary, read_next_bytes, read_intrinsics_text, read_extrinsics_text
+from scene.colmap_loader import read_intrinsics_binary, read_extrinsics_binary
+import multiprocessing as mp
+from multiprocessing import Pool
+import os
 
 def read_points3D_binary(path_to_model_file):
     """
@@ -112,51 +114,93 @@ class ID2RGBConverter:
 
         return id, self._id_to_rgb(id)  # Return the ID and corresponding RGB value
 
+
+class ImageCache:
+    """Simple image cache to avoid repeated file reads"""
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, image_path):
+        if image_path not in self.cache:
+            self.cache[image_path] = cv2.imread(image_path, -1)
+        return self.cache[image_path]
+
+
+def process_points_batch(args):
+    """Process a batch of 3D points in parallel"""
+    points_batch, images, label_image_dir, converter, image_cache = args
+    local_colors = []
+    local_labels = []
+
+    for point3D_id, point_data in points_batch:
+        x, y, z, r, g, b, error, track = point_data
+
+        for image_id, point2D_idx in track:
+            if image_id not in images:
+                continue
+
+            _, _, _, _, image_name, xys, _ = images[image_id]
+            if point2D_idx >= len(xys):
+                continue
+
+            u, v = xys[point2D_idx]
+            u, v = int(round(u)), int(round(v))
+
+            label_image_file = os.path.join(label_image_dir, image_name)
+            label_image_file = label_image_file.replace('.jpg', '.png') if label_image_file.endswith('.jpg') else label_image_file.replace('.JPG', '.png')
+
+            label_image = image_cache.get(label_image_file)
+            if label_image is None or v < 0 or v >= label_image.shape[0] or u < 0 or u >= label_image.shape[1]:
+                continue
+
+            obj_id = label_image[v, u]
+            _, rgb_color = converter.convert(obj_id)
+
+            local_colors.append((point3D_id, rgb_color))
+            local_labels.append((point3D_id, obj_id))
+
+    return local_colors, local_labels
+
+
 def assign_final_colors(points3D, all_colors, all_labels):
-    from collections import defaultdict, Counter
-    point_final_labels = {}    
+    """Assign final colors and labels through voting"""
+    point_final_labels = {}
     point_final_colors = {}
-    
+
     colors_dict = defaultdict(list)
     labels_dict = defaultdict(list)
 
     for pid, color in all_colors:
         colors_dict[pid].append(color)
-
     for pid, label in all_labels:
         labels_dict[pid].append(label)
 
-    for point_id in points3D:
+    for point_id in colors_dict:
         colors = colors_dict[point_id]
         labels = labels_dict[point_id]
 
-        # Filter out items where label == 0
+        # Filter out invalid labels
         filtered = [(c, l) for c, l in zip(colors, labels) if l != 0]
         if not filtered:
-            continue  # Skip this point if there are no valid labels
+            continue
 
         filtered_colors, filtered_labels = zip(*filtered)
-
         counter = Counter(filtered_labels)
         max_value = max(counter, key=counter.get)
-        # print(max_value)
 
-        # Find the color corresponding to the max_value label (take the first match)
+        # Find color for most common label
         label_indices = [i for i, label in enumerate(filtered_labels) if label == max_value]
         max_color = filtered_colors[label_indices[0]]
 
-        point_final_labels[point_id] = np.array(max_value)
-        point_final_colors[point_id] = np.array(max_color)
+        point_final_labels[point_id] = max_value
+        point_final_colors[point_id] = max_color
 
-    # Create a new points3D dictionary
+    # Create new points3D with final colors
     new_points3D = {}
-
     for point_id, point_data in points3D.items():
-        # Original data format: (x, y, z, r, g, b, error, track)
         x, y, z, r, g, b, error, track = point_data
         r_new, g_new, b_new = point_final_colors.get(point_id, (r, g, b))
         label = point_final_labels.get(point_id, 0)
-
         new_points3D[point_id] = (x, y, z, r_new, g_new, b_new, label)
 
     return new_points3D
@@ -179,62 +223,102 @@ def storePly(path, xyz, rgb, label):
 # Main process
 def main():
     import os
-    dataset_path = "datasets/lerf_mask"
+    import time
+    dataset_path = "/data2/zewei/Vid2Sim/src/vid2sim_recon/waymo_example"
     downscale = 1
 
-    for dataset_folder in os.listdir(dataset_path):
+    print(f"Starting processing of dataset at: {dataset_path}")
+    
+    # Check if dataset path exists
+    if not os.path.exists(dataset_path):
+        print(f"Error: Dataset path {dataset_path} does not exist!")
+        return
+    
+    dataset_folders = os.listdir(dataset_path)
+    print(f"Found {len(dataset_folders)} dataset folders: {dataset_folders}")
+    
+    for dataset_folder in dataset_folders:
+        print(f"\n{'='*50}")
         print(f"Processing {dataset_folder}...")
+        start_time = time.time()
+        
         label_image_dir = os.path.join(dataset_path, dataset_folder, 'object_mask')
         output_ply_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/points3D_corr.ply')
         camera_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/cameras.bin')
         image_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/images.bin')
         points3D_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/points3D.bin')
 
+        # Check if required files exist
+        required_files = [camera_file, image_file, points3D_file, label_image_dir]
+        for file_path in required_files:
+            if not os.path.exists(file_path):
+                print(f"Warning: Required file/directory not found: {file_path}")
+                continue
+        
+        print(f"Reading camera data from: {camera_file}")
         cameras = read_intrinsics_binary(camera_file)
+        print(f"Read {len(cameras)} cameras")
+        
+        print(f"Reading image data from: {image_file}")
         images = read_extrinsics_binary(image_file)
+        print(f"Read {len(images)} images")
+        
+        print(f"Reading points3D data from: {points3D_file}")
         points3D = read_points3D_binary(points3D_file)
+        print(f"Read {len(points3D)} 3D points")
+
+        # Use parallel processing with image caching
+        num_cores = min(mp.cpu_count(), 8)
+        print(f"Using {num_cores} CPU cores for parallel processing")
 
         converter = ID2RGBConverter()
+        image_cache = ImageCache()
+
+        print(f"Processing {len(points3D)} points...")
+
+        # Split points into batches for parallel processing
+        points_items = list(points3D.items())
+        batch_size = max(1000, len(points_items) // (num_cores * 2))
+        batches = [points_items[i:i + batch_size] for i in range(0, len(points_items), batch_size)]
+
+        print(f"Split into {len(batches)} batches")
+
+        # Parallel processing
         all_colors = []
         all_labels = []
 
-        for point3D_id, point_data in points3D.items():
-            x, y, z, r, g, b, error, track = point_data
-            votes = []
+        with Pool(processes=num_cores) as pool:
+            args_list = [(batch, images, label_image_dir, converter, image_cache) for batch in batches]
+            results = pool.map(process_points_batch, args_list)
 
-            for image_id, point2D_idx in track:
-                if image_id not in images:
-                    continue
-                _, _, _, _, image_name, xys, _ = images[image_id]
-                if point2D_idx >= len(xys):
-                    continue
-                u, v = xys[point2D_idx]
-                u = int(round(u))
-                v = int(round(v))
+            for batch_colors, batch_labels in results:
+                all_colors.extend(batch_colors)
+                all_labels.extend(batch_labels)
 
-                label_image_file = os.path.join(label_image_dir, image_name)
-                label_image_file = label_image_file.replace('.jpg', '.png') if label_image_file.endswith('.jpg') else label_image_file.replace('.JPG', '.png')
-                label_image = cv2.imread(label_image_file, -1)
-                if label_image is None or v < 0 or v >= label_image.shape[0] or u < 0 or u >= label_image.shape[1]:
-                    continue
-
-                obj_id = label_image[v, u]
-                _, rgb_color = converter.convert(obj_id)
-
-                all_colors.append((point3D_id, rgb_color))
-                all_labels.append((point3D_id, obj_id))
-
+        print(f"Processed {len(all_colors)} color mappings, {len(all_labels)} label mappings")
+        print(f"Cached {len(image_cache.cache)} images")
 
         # Assign colors and labels through voting
+        print("Assigning final colors and labels...")
         points3D = assign_final_colors(points3D, all_colors, all_labels)
 
-        # Extract and save
+        # Extract and save PLY file
+        print("Extracting data for PLY file...")
         xyz = np.array([[p[0], p[1], p[2]] for p in points3D.values()])
         rgb = np.array([[p[3], p[4], p[5]] for p in points3D.values()])
         label = np.array([[p[6]] for p in points3D.values()])
 
+        print(f"Saving PLY file to: {output_ply_file}")
+        os.makedirs(os.path.dirname(output_ply_file), exist_ok=True)
         storePly(output_ply_file, xyz, rgb, label)
+
+        elapsed_time = time.time() - start_time
         print(f"Point cloud saved to {output_ply_file}")
+        print(f"Processing completed in {elapsed_time:.2f} seconds")
+        print(f"Output PLY contains {len(xyz)} points")
+
+    print(f"\n{'='*50}")
+    print("All datasets processed successfully!")
 
 if __name__ == "__main__":
     main()

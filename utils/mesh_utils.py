@@ -32,6 +32,12 @@ def post_process_mesh(mesh, cluster_to_keep=1000):
     triangle_clusters = np.asarray(triangle_clusters)
     cluster_n_triangles = np.asarray(cluster_n_triangles)
     cluster_area = np.asarray(cluster_area)
+    
+    # Check if mesh has any clusters
+    if len(cluster_n_triangles) == 0:
+        print("Warning: Mesh has no clusters, returning empty mesh")
+        return mesh_0
+    
     n_cluster = np.sort(cluster_n_triangles.copy())[-cluster_to_keep]
     n_cluster = max(n_cluster, 50) # filter meshes smaller than 50
     triangles_to_remove = cluster_n_triangles[triangle_clusters] < n_cluster
@@ -160,6 +166,19 @@ class GaussianExtractor(object):
             rgb = self.rgbmaps[i]
             depth = self.depthmaps[i]
             
+            # Debug: Check depth map validity
+            if depth is None:
+                print(f"Warning: Depth map {i} is None, skipping...")
+                continue
+                
+            depth_valid = (depth > 0).sum().item()
+            depth_total = depth.numel()
+            print(f"Frame {i}: {depth_valid}/{depth_total} valid depth pixels ({depth_valid/depth_total*100:.1f}%)")
+            
+            if depth_valid == 0:
+                print(f"Warning: Frame {i} has no valid depth pixels, skipping...")
+                continue
+            
             # if we have mask provided, use it
             if mask_backgrond and (self.viewpoint_stack[i].alpha_mask is not None):
                 depth[(self.viewpoint_stack[i].alpha_mask < 0.5)] = 0
@@ -175,6 +194,16 @@ class GaussianExtractor(object):
             volume.integrate(rgbd, intrinsic=cam_o3d.intrinsic, extrinsic=cam_o3d.extrinsic)
 
         mesh = volume.extract_triangle_mesh()
+        
+        # Debug: Check if mesh has vertices
+        if len(mesh.vertices) == 0:
+            print("Warning: Extracted mesh has no vertices!")
+            print("This might be due to:")
+            print("1. No valid depth information in the rendered views")
+            print("2. Depth values are all zero or invalid")
+            print("3. TSDF parameters (voxel_size, sdf_trunc, depth_trunc) are inappropriate")
+            print("4. The queried object is not visible from the training cameras")
+        
         return mesh
 
     @torch.no_grad()
