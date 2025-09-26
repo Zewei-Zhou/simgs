@@ -184,24 +184,45 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         # Object loss
         if opt.lambda_object_loss > 0:
-            object_loss = 0.0
-            for label in gaussians.label_ids.unique():
-                if label > 0:
-                    object_mask = (gaussians.label_ids.squeeze() == label) & visible_mask
-                    object_render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask=object_mask)
-                    render_image, render_alpha = object_render_pkg["render"], object_render_pkg["render_alphas"]
-                    gt_object_mask = (viewpoint_cam.object_mask.cuda() == label).expand_as(gt_image)
-                    if gt_object_mask.sum() > 0:
-                        object_loss += l1_loss(gt_image[gt_object_mask], render_image[gt_object_mask])
-                        object_loss += 1.0 * l1_loss(gt_object_mask.float(), render_alpha)
+            # object_loss = 0.0
+            # for label in gaussians.label_ids.unique():
+            #     if label > 0:
+            #         object_mask = (gaussians.label_ids.squeeze() == label) & visible_mask
+            #         object_render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask=object_mask)
+            #         render_image, render_alpha = object_render_pkg["render"], object_render_pkg["render_alphas"]
+            #         gt_object_mask = (viewpoint_cam.object_mask.cuda() == label).expand_as(gt_image)
+            #         if gt_object_mask.sum() > 0:
+            #             object_loss += l1_loss(gt_image[gt_object_mask], render_image[gt_object_mask])
+            #             object_loss += 1.0 * l1_loss(gt_object_mask.float(), render_alpha)
+            # losses["object_loss"] = opt.lambda_object_loss * object_loss
+            gt_object_ids = gaussians.id_encoder.label_to_index(viewpoint_cam.object_mask.cuda()).long()
+            object_loss = torch.nn.CrossEntropyLoss(ignore_index=0, reduction='mean')(semantics.permute(0,3,1,2), gt_object_ids.unsqueeze(0))
+            # object_loss = torch.nn.CrossEntropyLoss(reduction='mean')(semantics.permute(0,3,1,2), gt_object_ids.unsqueeze(0))
             losses["object_loss"] = opt.lambda_object_loss * object_loss
 
-        # Sky opacity loss
+            prob_zero_class = semantics[..., 0]  
+            losses["zero_penalty"] = opt.lambda_zero_penalty * prob_zero_class.mean()
+
+
+        # Sky opacity loss - Enhanced with DriveStudio approach
         if opt.lambda_sky_opa > 0:
-            o = alpha.clamp(1e-6, 1-1e-6)
-            sky = alpha_mask.float()
-            loss_sky_opa = (-(1-sky) * torch.log(1 - o)).mean()
-            losses["sky_opa_loss"] =  opt.lambda_sky_opa * loss_sky_opa
+            # Check if we have sky masks available
+            if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
+                # Use DriveStudio approach with sky masks
+                sky_masks = viewpoint_cam.sky_mask.squeeze().cuda()  # 1 for sky, 0 for non-sky
+                gt_occupied_mask = (1.0 - sky_masks).float()  # Convert to occupied mask
+                pred_occupied_mask = alpha.squeeze()
+                
+                # Safe binary cross entropy loss
+                pred_occupied_mask = torch.clamp(pred_occupied_mask, 1e-6, 1-1e-6)
+                loss_sky_opa = F.binary_cross_entropy(pred_occupied_mask, gt_occupied_mask, reduction="mean")
+            else:
+                # Fallback to original ObjectGS approach
+                o = alpha.clamp(1e-6, 1-1e-6)
+                sky = alpha_mask.float()
+                loss_sky_opa = (-(1-sky) * torch.log(1 - o)).mean()
+            
+            losses["sky_opa_loss"] = opt.lambda_sky_opa * loss_sky_opa
 
         # Opacity entropy loss
         if opt.lambda_opacity_entropy > 0:
@@ -273,7 +294,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     from gaussian_renderer.render import prefilter_voxel
                     visible_mask = prefilter_voxel(viewpoint_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask    
 
-                vis_render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
+                vis_render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, tile_size=pipe.tile_size)
                 vis_image, alpha = vis_render_pkg["render"], vis_render_pkg["render_alphas"]
                 gt_image = viewpoint_cam.original_image.cuda()
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()

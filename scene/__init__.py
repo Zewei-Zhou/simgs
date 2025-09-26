@@ -63,7 +63,8 @@ class Scene:
         elif args.data_format == 'colmap':
             print("Use Colmap data set!")
             scene_info = sceneLoadTypeCallbacks["Colmap"](
-                args.source_path, args.eval, args.images, args.depths, args.masks, args.add_mask, args.add_depth, args.llffhold
+                args.source_path, args.eval, args.images, args.depths, args.masks, args.add_mask, args.add_depth, args.llffhold,
+                getattr(args, 'sky_masks', None), getattr(args, 'add_sky_mask', False)
             )
         elif args.data_format == 'city':
             print("Use City data set!")

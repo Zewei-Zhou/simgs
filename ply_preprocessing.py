@@ -224,7 +224,7 @@ def storePly(path, xyz, rgb, label):
 def main():
     import os
     import time
-    dataset_path = "/data2/zewei/Vid2Sim/src/vid2sim_recon/waymo_example"
+    dataset_path = "/data3/zewei/ObjectGS/waymo_example"
     downscale = 1
 
     print(f"Starting processing of dataset at: {dataset_path}")

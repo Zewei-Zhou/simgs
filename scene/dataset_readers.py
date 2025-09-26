@@ -43,6 +43,7 @@ class CameraInfo(NamedTuple):
     CY: np.array
     image: np.array
     mask: np.array
+    sky_mask: np.array
     depth: np.array
     depth_params: dict
     image_path: str
@@ -161,7 +162,7 @@ def storePly(path, xyz, rgb, label_ids):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
     
-def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, masks_folder, depths_folder):
+def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, masks_folder, depths_folder, sky_masks_folder=None):
     cam_infos = []
     
     def process_frame(idx, key):
@@ -205,6 +206,16 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             mask = Image.open(mask_path)
         else:   
             mask = None
+            
+        if sky_masks_folder is not None:
+            sky_mask_path = os.path.join(sky_masks_folder, extr.name)
+            if os.path.exists(sky_mask_path):
+                sky_mask = Image.open(sky_mask_path).convert("L")
+            else:
+                sky_mask = None
+        else:   
+            sky_mask = None
+            
         if depths_folder is not None:
             depth_path = os.path.join(depths_folder, extr.name.replace(".JPG", ".png")) 
             # depth_path = os.path.join(depths_folder, extr.name.replace(".jpg", ".png")) 
@@ -222,6 +233,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             CY=CY,
             image=image,
             mask=mask,
+            sky_mask=sky_mask,
             depth=depth,
             depth_params=depth_params,
             image_path=image_path, 
@@ -289,7 +301,7 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             CX = cx
             CY = cy
 
-            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, depth=None, depth_params=None,
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, sky_mask=None, depth=None, depth_params=None,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
 
         test_frames = contents["test_frames"]
@@ -317,14 +329,14 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             CX = cx
             CY = cy
 
-            test_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, depth=None, depth_params=None,
+            test_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, sky_mask=None, depth=None, depth_params=None,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
 
     cam_infos = sorted(cam_infos, key = lambda x : x.image_path)
     test_cam_infos = sorted(test_cam_infos, key= lambda x : x.image_path)
     return cam_infos, test_cam_infos
 
-def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, llffhold=32):
+def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, llffhold=32, sky_masks=None, add_sky_mask=False):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -366,7 +378,8 @@ def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, 
     reading_dir = os.path.join(path, images)
     mask_dir = os.path.join(path, masks) if add_mask else None
     depth_dir = os.path.join(path, depths) if add_depth else None
-    cam_infos = readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, reading_dir, mask_dir, depth_dir)
+    sky_mask_dir = os.path.join(path, sky_masks) if add_sky_mask and sky_masks else None
+    cam_infos = readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, reading_dir, mask_dir, depth_dir, sky_mask_dir)
     
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]

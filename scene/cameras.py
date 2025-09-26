@@ -22,7 +22,7 @@ class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, Cx, Cy, FoVx, FoVy, image, alpha_mask, 
                  image_name, image_path, resolution_scale, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 data_format='matrixcity',gt_depth=None, depth_params=None
+                 data_format='matrixcity',gt_depth=None, depth_params=None, sky_mask=None
                  ):
         super(Camera, self).__init__()
 
@@ -52,6 +52,16 @@ class Camera(nn.Module):
             self.alpha_mask = resized_image_rgb[3:4, ...].to(self.data_device)
         else: 
             self.alpha_mask = torch.ones_like(resized_image_rgb[0:1, ...].to(self.data_device))
+            
+        # Handle sky mask
+        if sky_mask is not None:
+            self.sky_mask = PILtoTorch(sky_mask, resolution).to(self.data_device)
+            # Ensure sky mask is in [0, 1] range and single channel
+            if self.sky_mask.shape[0] > 1:
+                self.sky_mask = self.sky_mask.mean(dim=0, keepdim=True)
+            self.sky_mask = (self.sky_mask > 0.5).float()  # Binarize: 1 for sky, 0 for non-sky
+        else:
+            self.sky_mask = torch.zeros_like(resized_image_rgb[0:1, ...].to(self.data_device))
     
         self.invdepthmap = None # use invdepth to avoid the floater in near places
         self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
