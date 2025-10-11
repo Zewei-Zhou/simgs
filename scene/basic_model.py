@@ -44,6 +44,7 @@ class BasicModel:
 
     def smooth_complement(self, visible_mask): 
         return torch.ones((visible_mask.sum(), 1), dtype=torch.float, device="cuda")
+        #return torch.ones((visible_mask.sum(), self.n_offsets), dtype=torch.float, device="cuda")
 
     def set_anchor_mask(self, *args):
         self._anchor_mask = torch.ones(self._anchor.shape[0], dtype=torch.bool, device="cuda")

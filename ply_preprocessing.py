@@ -139,7 +139,14 @@ def process_points_batch(args):
             if image_id not in images:
                 continue
 
-            _, _, _, _, image_name, xys, _ = images[image_id]
+            # --- FIX STARTS HERE ---
+            # 1. Read the stored name, which might contain a path
+            _, _, _, _, stored_image_name, xys, _ = images[image_id]
+
+            # 2. Use os.path.basename() to get only the filename
+            image_name = os.path.basename(stored_image_name)
+            # --- FIX ENDS HERE ---
+
             if point2D_idx >= len(xys):
                 continue
 
@@ -147,6 +154,7 @@ def process_points_batch(args):
             u, v = int(round(u)), int(round(v))
 
             label_image_file = os.path.join(label_image_dir, image_name)
+            # The replace logic remains the same
             label_image_file = label_image_file.replace('.jpg', '.png') if label_image_file.endswith('.jpg') else label_image_file.replace('.JPG', '.png')
 
             label_image = image_cache.get(label_image_file)

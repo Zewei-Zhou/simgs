@@ -217,7 +217,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             sky_mask = None
             
         if depths_folder is not None:
-            depth_path = os.path.join(depths_folder, extr.name.replace(".JPG", ".png")) 
+            depth_path = os.path.join(depths_folder, str(Path(extr.name).with_suffix(".png"))) 
             # depth_path = os.path.join(depths_folder, extr.name.replace(".jpg", ".png")) 
             depth = cv2.imread(depth_path, -1).astype(np.float32) / float(2**16)
         else:

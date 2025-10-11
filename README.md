@@ -86,7 +86,39 @@ conda env create --file environment.yml
 ### 🌟 Training
 
 #### Data Preprocessing
+##### Step1: Generate Dynamic Masks
+Convert your video into image sequences and save them in a folder images.
+```shell
+seq_path/
+├── images/
+│   ├── 00001.jpg
+│   ├── 00002.jpg
+│   ├── ...
+```
+Then, run the following command to generate dynamic masks.
+```shell
+cd preprocess/tools/
+bash generate_mask.sh $seq_path
+```
 
+##### Step2: Run SfM to reconstruct the camera poses and point cloud prior
+Install neccessary packages.
+```shell
+conda install -c conda-forge cudatoolkit colmap glomap
+```
+Then run the following command to run SfM.
+```shell
+bash run_sfm.sh $seq_path
+```
+The SfM results will be saved in the folder sparse under the sequence path.
+##### Step3: Generate depth prior
+```shell
+bash generate_depth.sh $seq_path
+```
+We use monocular depth estimation to generate depth prior for the scene. These extra geometry clues will help us reconstruct the scene more accurately. The reconstructed mesh will further serve as the foundation for agent-scene interaction and collision detection in the following RL training stage. The depth results will be saved in the depth folder depths under the sequence path.
+
+##### Step4: Point Cloud Preprocessing
+Preprocessing 3D point clouds with semantic labels by projecting them onto 2D images and assigning colors/labels through various voting strategies.
 ```shell
 python ply_preprocessing.py
 ```

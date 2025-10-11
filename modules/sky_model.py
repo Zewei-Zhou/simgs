@@ -27,11 +27,13 @@ class SinusoidalEncoder(nn.Module):
         Returns:
             Encoded tensor of shape (..., n_output_dims)
         """
-        scales = torch.pow(2.0, torch.arange(self.min_deg, self.max_deg + 1, device=x.device, dtype=x.dtype))
+        # Ensure consistent device and dtype
+        scales = torch.pow(2.0, torch.arange(self.min_deg, self.max_deg + 1, 
+                                           device=x.device, dtype=x.dtype))
         shape = list(x.shape[:-1]) + [-1]
         scaled_x = (x[..., None, :] * scales[:, None]).reshape(shape)
         encoded = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
-        return encoded
+        return encoded.contiguous()
 
 
 class MLP(nn.Module):
@@ -104,6 +106,9 @@ class SkyModel(nn.Module):
             skip_connections=[1],
         )
         self.in_test_set = False
+        
+        # Move all components to the specified device
+        self.to(device)
     
     def forward(self, viewdirs: torch.Tensor, img_idx: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -116,27 +121,29 @@ class SkyModel(nn.Module):
         Returns:
             RGB sky colors of shape (..., 3)
         """
-        self.device = viewdirs.device
+        # Simple approach - assume inputs are already on correct device
         prefix = viewdirs.shape[:-1]
+        viewdirs = F.normalize(viewdirs, dim=-1, eps=1e-6)
         
         # Encode directions
-        dd = self.direction_encoding(viewdirs.reshape(-1, 3)).to(self.device)
+        dd = self.direction_encoding(viewdirs.reshape(-1, 3))
         
         if self.enable_appearance_embedding:
             # Add appearance embedding
             if img_idx is not None and not self.in_test_set:
-                appearance_embedding = self.appearance_embedding(img_idx.reshape(-1)).reshape(-1, self.appearance_embedding_dim)
+                appearance_embedding = self.appearance_embedding(img_idx.reshape(-1))
+                appearance_embedding = appearance_embedding.reshape(-1, self.appearance_embedding_dim)
             else:
-                # Use mean appearance embedding
-                appearance_embedding = torch.ones(
-                    (*dd.shape[:-1], self.appearance_embedding_dim),
-                    device=dd.device,
-                    dtype=dd.dtype
-                ) * self.appearance_embedding.weight.mean(dim=0)
+                # Use mean appearance embedding - ensure it's on the same device as dd
+                mean_weight = self.appearance_embedding.weight.mean(dim=0)
+                appearance_embedding = mean_weight.unsqueeze(0).expand(dd.shape[0], -1)
+            
+            # Ensure both tensors are on the same device before concatenation
+            appearance_embedding = appearance_embedding.to(device=dd.device, dtype=dd.dtype)
             dd = torch.cat([dd, appearance_embedding], dim=-1)
             
-        rgb_sky = self.sky_head(dd).to(self.device)
-        rgb_sky = F.sigmoid(rgb_sky)
+        rgb_sky = self.sky_head(dd)
+        rgb_sky = torch.sigmoid(rgb_sky)
         return rgb_sky.reshape(prefix + (3,))
     
     def get_param_groups(self) -> Dict[str, torch.nn.Parameter]:
@@ -169,23 +176,9 @@ class EnvLight(torch.nn.Module):
         Returns:
             RGB sky colors of shape (..., 3)
         """
-        l = viewdirs
-        l = (l.reshape(-1, 3) @ self.to_opengl.T).reshape(*l.shape)
-        l = l.contiguous()
-        prefix = l.shape[:-1]
-        
-        if len(prefix) != 3:  # reshape to [B, H, W, -1]
-            l = l.reshape(1, 1, -1, l.shape[-1])
-
-        try:
-            import nvdiffrast.torch as dr
-            light = dr.texture(self.base[None, ...], l, filter_mode='linear', boundary_mode='cube')
-            light = light.view(*prefix, -1)
-        except ImportError:
-            # Fallback to simple sampling if nvdiffrast is not available
-            print("Warning: nvdiffrast not available, using simplified sky model")
-            light = torch.ones(*prefix, 3, device=viewdirs.device) * 0.5
-            
+        # Always use fallback instead of nvdiffrast to avoid CUDA issues
+        prefix = viewdirs.shape[:-1]
+        light = torch.ones(*prefix, 3, device=viewdirs.device, dtype=viewdirs.dtype) * 0.5
         return light
     
     def get_param_groups(self) -> Dict[str, torch.nn.Parameter]:
@@ -205,8 +198,16 @@ def create_sky_model(model_type: str = "neural", **kwargs) -> nn.Module:
         Sky model instance
     """
     if model_type == "neural":
-        return SkyModel(**kwargs)
+        model = SkyModel(**kwargs)
+        # Ensure model is on the correct device
+        if 'device' in kwargs:
+            model = model.to(kwargs['device'])
+        return model
     elif model_type == "envlight":
-        return EnvLight(**kwargs)
+        model = EnvLight(**kwargs)
+        # Ensure model is on the correct device
+        if 'device' in kwargs:
+            model = model.to(kwargs['device'])
+        return model
     else:
         raise ValueError(f"Unknown sky model type: {model_type}")

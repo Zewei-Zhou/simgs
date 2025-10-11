@@ -46,6 +46,8 @@ import yaml
 import torch.nn.functional as F
 import warnings
 from render import render_sets
+from modules.sky_model import create_sky_model
+from modules.sky_losses import SkyLossManager
 warnings.filterwarnings('ignore')
 
 lpips_fn = lpips.LPIPS(net='vgg').to('cuda')
@@ -111,7 +113,32 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
-    
+    # -----------------------Sky Model Integration-----------------------------------
+    # Extract the number of images from the dataset configuration
+    n_images = len(dataset.images) if hasattr(dataset, 'images') else 0
+    # simple sky model
+    sky_model = create_sky_model(
+        model_type="neural",
+        n_images=n_images,  # Number of images in the dataset
+        head_mlp_layer_width=64,  # Default MLP layer width
+        enable_appearance_embedding=True,  # Enable appearance embedding
+        appearance_embedding_dim=16,  # Default embedding dimension
+        device=torch.device("cuda")  # Use CUDA device
+    )
+    # environment light model
+    # sky_model = create_sky_model(
+    #     model_type="envlight",  
+    #     resolution=1024,
+    #     device=torch.device("cuda")
+    # )
+    sky_loss_manager = SkyLossManager({
+        "opacity_loss_type": "safe_bce",
+        "opacity_loss_weight": opt.lambda_sky_opa,
+        "regularization_weight": 0.01
+    })
+    sky_params = sky_model.get_param_groups()
+    optimizer_sky = torch.optim.Adam([{'params': list(sky_model.parameters()), 'lr': 0.001, 'name': 'sky_model'}])
+    # -------------------------------------------------------------------------------
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
     
@@ -159,7 +186,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             from gaussian_renderer.render import prefilter_voxel
             visible_mask = prefilter_voxel(viewpoint_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask    
 
-        render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
+        # -----------------------Sky Render-----------------------------------
+        render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, training=True, object_mask=None, sky_model=sky_model)
+        #render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
         image, scaling, alpha, semantics = render_pkg["render"], render_pkg["scaling"], render_pkg["render_alphas"], render_pkg["render_semantics"]
 
         gt_image = viewpoint_cam.original_image.cuda()
@@ -203,27 +232,37 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             prob_zero_class = semantics[..., 0]  
             losses["zero_penalty"] = opt.lambda_zero_penalty * prob_zero_class.mean()
 
-
-        # Sky opacity loss - Enhanced with DriveStudio approach
-        if opt.lambda_sky_opa > 0:
-            # Check if we have sky masks available
-            if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
-                # Use DriveStudio approach with sky masks
-                sky_masks = viewpoint_cam.sky_mask.squeeze().cuda()  # 1 for sky, 0 for non-sky
-                gt_occupied_mask = (1.0 - sky_masks).float()  # Convert to occupied mask
-                pred_occupied_mask = alpha.squeeze()
+        #--------------sky loss (original, to be checked)---------------
+        # # Sky opacity loss - Enhanced with DriveStudio approach
+        # if opt.lambda_sky_opa > 0:
+        #     # Check if we have sky masks available
+        #     if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
+        #         # Use DriveStudio approach with sky masks
+        #         sky_masks = viewpoint_cam.sky_mask.squeeze().cuda()  # 1 for sky, 0 for non-sky
+        #         gt_occupied_mask = (1.0 - sky_masks).float()  # Convert to occupied mask
+        #         pred_occupied_mask = alpha.squeeze()
                 
-                # Safe binary cross entropy loss
-                pred_occupied_mask = torch.clamp(pred_occupied_mask, 1e-6, 1-1e-6)
-                loss_sky_opa = F.binary_cross_entropy(pred_occupied_mask, gt_occupied_mask, reduction="mean")
-            else:
-                # Fallback to original ObjectGS approach
-                o = alpha.clamp(1e-6, 1-1e-6)
-                sky = alpha_mask.float()
-                loss_sky_opa = (-(1-sky) * torch.log(1 - o)).mean()
+        #         # Safe binary cross entropy loss
+        #         pred_occupied_mask = torch.clamp(pred_occupied_mask, 1e-6, 1-1e-6)
+        #         loss_sky_opa = F.binary_cross_entropy(pred_occupied_mask, gt_occupied_mask, reduction="mean")
+        #     else:
+        #         # Fallback to original ObjectGS approach
+        #         o = alpha.clamp(1e-6, 1-1e-6)
+        #         sky = alpha_mask.float()
+        #         loss_sky_opa = (-(1-sky) * torch.log(1 - o)).mean()
             
-            losses["sky_opa_loss"] = opt.lambda_sky_opa * loss_sky_opa
-
+        #     losses["sky_opa_loss"] = opt.lambda_sky_opa * loss_sky_opa
+        #-------------------------------------------------------------
+        #--------------sky loss (original, to be checked)---------------
+        if opt.lambda_sky_opa > 0 and hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
+            sky_losses = sky_loss_manager.compute_losses(
+                pred_opacity=render_pkg["render_alphas"],
+                sky_masks=viewpoint_cam.sky_mask.squeeze().cuda()
+            )
+            for loss_name, loss_value in sky_losses.items():
+                losses[loss_name] = loss_value
+        #-------------------------------------------------------------
+                 
         # Opacity entropy loss
         if opt.lambda_opacity_entropy > 0:
             o = alpha.clamp(1e-6, 1 - 1e-6)
@@ -277,7 +316,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, getattr(modules, 'render'), (pipe, scene.background), wandb, logger)
+            training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, getattr(modules, 'render_with_sky'), (pipe, scene.background), wandb, logger)
             
             if (iteration in saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -294,7 +333,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     from gaussian_renderer.render import prefilter_voxel
                     visible_mask = prefilter_voxel(viewpoint_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask    
 
-                vis_render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, tile_size=pipe.tile_size)
+                vis_render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
                 vis_image, alpha = vis_render_pkg["render"], vis_render_pkg["render_alphas"]
                 gt_image = viewpoint_cam.original_image.cuda()
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -346,7 +385,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
+                #--------------sky model optimizer step----------------
+                optimizer_sky.step()
+                #-----------------------------------------------------
                 gaussians.optimizer.zero_grad(set_to_none = True)
+                #--------------sky model optimizer step----------------
+                optimizer_sky.zero_grad()
+                #-----------------------------------------------------
 
             if iteration >= opt.iterations - pipe.no_prefilter_step:
                 pipe.add_prefilter = False

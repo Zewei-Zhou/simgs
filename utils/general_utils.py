@@ -17,6 +17,7 @@ import random
 from types import SimpleNamespace
 from sklearn.neighbors import NearestNeighbors
 import matplotlib.cm as cm
+from utils.graphics_utils import normal_from_depth_image
 
 def visualize_depth(depth, near=0.01, far=15, linear=False):
     depth = depth[0].clone().detach().cpu().numpy()
@@ -187,3 +188,17 @@ def knn(x, K):
     model = NearestNeighbors(n_neighbors=K, metric="euclidean").fit(x_np)
     distances, _ = model.kneighbors(x_np)
     return torch.from_numpy(distances).to(x)
+
+def render_normal(viewpoint_cam, depth, offset=None, normal=None, scale=1):
+    # depth: (H, W), bg_color: (3), alpha: (H, W)
+    # normal_ref: (3, H, W)
+    intrinsic_matrix, extrinsic_matrix = viewpoint_cam.get_calib_matrix_nerf(scale=scale)
+    st = max(int(scale/2)-1,0)
+    if offset is not None:
+        offset = offset[st::scale,st::scale]
+    normal_ref = normal_from_depth_image(depth[st::scale,st::scale], 
+                                            intrinsic_matrix.to(depth.device), 
+                                            extrinsic_matrix.to(depth.device), offset)
+
+    normal_ref = normal_ref.permute(2,0,1)
+    return normal_ref

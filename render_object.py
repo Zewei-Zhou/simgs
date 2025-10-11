@@ -32,7 +32,7 @@ from utils.general_utils import safe_state, parse_cfg, visualize_depth, visualiz
 from utils.image_utils import save_rgba
 from argparse import ArgumentParser
 
-def render_set(model_path, name, iteration, views, gaussians, pipe, background, query_label_id):
+def render_set(model_path, name, iteration, views, gaussians, pipe, background, sky_model, query_label_id):
     vis_normal=False
     vis_depth=False
     if gaussians.gs_attr == "2D":
@@ -78,7 +78,10 @@ def render_set(model_path, name, iteration, views, gaussians, pipe, background, 
 
         # render function
         torch.cuda.synchronize();t_start = time.time()
-        render_pkg = getattr(modules, 'render')(view, gaussians, pipe, background, visible_mask=visible_mask, object_mask=object_mask)
+        if sky_model is not None:
+            render_pkg = getattr(modules, 'render_with_sky')(view, gaussians, pipe, background, visible_mask=visible_mask, training = False, object_mask=object_mask, sky_model=sky_model)
+        else:
+            render_pkg = getattr(modules, 'render')(view, gaussians, pipe, background, visible_mask=visible_mask, training = False, object_mask=object_mask)
         torch.cuda.synchronize();t_end = time.time()
 
         t_list.append(t_end - t_start)
@@ -137,22 +140,36 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, ape_code, 
 
         if not os.path.exists(dataset.model_path):
             os.makedirs(dataset.model_path)
+            print("###################################################################")
+            print("Model saved path: {} does not exist. Created.".format(dataset.model_path))
         
-        scene.background = torch.ones_like(scene.background).cuda()
+        sky_model = None
+        sky_model_path = os.path.join(dataset.model_path, f"sky_model_{iteration}.pth")
+        if os.path.exists(sky_model_path):
+            from modules.sky_model import create_sky_model
+            sky_model = create_sky_model(model_type="envlight", resolution=1024)
+            sky_model.load_state_dict(torch.load(sky_model_path))
+            sky_model.eval()
+            print(f"Loaded sky model from {sky_model_path}")
+        else:
+            print("No sky model found, using standard background")
+
+        
+        # scene.background = torch.ones_like(scene.background).cuda()
 
         if query_label_id == -1:
             for label in gaussians.label_ids.unique():
                 if not skip_train:
-                    render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, label)
+                    render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, sky_model, label)
 
                 if not skip_test:
-                    render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background, label)
+                    render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background, sky_model, label)
         else:
             if not skip_train:
-                render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, query_label_id)
+                render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, sky_model, query_label_id)
 
             if not skip_test:
-                render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background, query_label_id)
+                render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background, sky_model, query_label_id)
             
 
 if __name__ == "__main__":
