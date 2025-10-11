@@ -7,6 +7,7 @@ import math
 import imageio
 from tqdm import tqdm
 from pathlib import Path
+import json
 
 from PIL import Image
 from transformers import pipeline
@@ -149,14 +150,14 @@ def process_image(args, cam, pts, pipe, device):
     full_zero_mask = pred_dis != 0
     pred_dis[full_zero_mask] = pred_dis[full_zero_mask] * scale + offset
 
-    return pred_dis.cpu().numpy(), sfm_depth
+    return pred_dis.cpu().numpy(), sfm_depth, scale.item()
 
 async def save_results(
         depth_out_path, 
         sfm_depth_out_path,
         vis_depth_out_path, 
         vis_normal_out_path, 
-        image_name, pred_depth, sfm_depth, vis_depth, vis_normal):
+        image_name, pred_depth, sfm_depth, vis_depth, vis_normal, scale):
     # depth_file = os.path.join(depth_out_path, image_name[:-4] + ".png")
     depth_file = os.path.join(depth_out_path, os.path.splitext(image_name)[0] + ".png")
     sfm_depth_file = os.path.join(sfm_depth_out_path, image_name[:-4] + ".npz")
@@ -177,12 +178,12 @@ def process_batch(args, cam_batch, all_cams, pts, model_path, device):
     pipe = pipeline(task="depth-estimation", model=model_path, device=device)
     results = []
     for cam in cam_batch:
-        pred_dis, sfm_depth = process_image(args, cam, pts, pipe, device)
+        pred_dis, sfm_depth, scale = process_image(args, cam, pts, pipe, device)
         vis_depth = visualize_depth(pred_dis).permute(1, 2, 0).cpu().numpy()
         vis_normal = visualize_normal(pred_dis, cam).cpu().numpy()
         vis_depth = (vis_depth[:, :, :3] * 255).astype(np.uint8)
         vis_normal = (vis_normal[:, :, :3] * 255).astype(np.uint8)
-        results.append((os.path.basename(cam["image_path"]), pred_dis, sfm_depth, vis_depth, vis_normal))
+        results.append((os.path.basename(cam["image_path"]), pred_dis, sfm_depth, vis_depth, vis_normal, scale))
     return results
 
 @torch.no_grad()
@@ -211,6 +212,7 @@ def process(args):
     os.makedirs(vis_depth_out_path, exist_ok=True)
     os.makedirs(vis_normal_out_path, exist_ok=True)
 
+    depth_params = {}
     # Debug
     batch_size = 4  # Adjust based on your GPU memory
     num_processes = min(multiprocessing.cpu_count(), 4)  # Limit to 4 or CPU count, whichever is smaller
@@ -220,10 +222,19 @@ def process(args):
             cam_batch = cam_infos[i:i+batch_size]
             results = pool.apply(process_batch, args=(args, cam_batch, cam_infos, pts, model_path, device))
             
+            for res in results:
+                image_name_without_ext = os.path.splitext(res[0])[0]
+                depth_params[image_name_without_ext] = {"scale": res[-1]}
+
             loop = asyncio.get_event_loop()
-            tasks = [save_results(depth_out_path, sfm_depth_out_path, vis_depth_out_path, vis_normal_out_path, image_name, pred_depth, sfm_depth, vis_depth, vis_normal) 
-                     for image_name, pred_depth, sfm_depth, vis_depth, vis_normal in results]
+            tasks = [save_results(depth_out_path, sfm_depth_out_path, vis_depth_out_path, vis_normal_out_path, *res) 
+                     for res in results]
             loop.run_until_complete(asyncio.gather(*tasks))
+
+    depth_params_path = os.path.join(path, "sparse/0", "depth_params.json")
+    with open(depth_params_path, 'w') as f:
+        json.dump(depth_params, f, indent=4)
+    print(f"Saved depth parameters to {depth_params_path}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

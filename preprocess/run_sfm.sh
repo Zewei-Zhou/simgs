@@ -13,13 +13,13 @@ SEQ_PATH=$1
 # Default values (edit if needed)
 NO_GPU_FLAG=""                         # Use "--no_gpu" to disable GPU
 SKIP_MATCHING_FLAG=""                  # Use "--skip_matching" to skip matching
-SINGLE_CAMERA_FLAG=""                  # Use "--single_camera" to assume same camera for all images
-MASK_PATH="$SEQ_PATH/masks"           # Default to <seq_path>/masks if not overridden
+FORCE_REEXTRACT_FLAG=""                # Use "--force_reextract" to force re-extraction of features
+MASK_PATH="$SEQ_PATH/masks"            # Default to <seq_path>/masks if not overridden
 CAMERA="OPENCV"
-COLMAP_EXECUTABLE=""                  # Default: use "colmap" in PATH
-GLOMAP_EXECUTABLE=""                  # Default: use "glomap" in PATH
-MAGICK_EXECUTABLE=""                 # Default: use "magick" in PATH
-RESIZE_FLAG=""                        # Use "--resize" to enable resizing
+COLMAP_EXECUTABLE=""                   # Default: use "colmap" in PATH
+GLOMAP_EXECUTABLE=""                   # Default: use "glomap" in PATH
+MAGICK_EXECUTABLE=""                   # Default: use "magick" in PATH
+RESIZE_FLAG=""                         # Use "--resize" to enable resizing
 
 # Allow overrides using environment variables
 if [ ! -z "$NO_GPU" ]; then
@@ -30,8 +30,9 @@ if [ ! -z "$SKIP_MATCHING" ]; then
   SKIP_MATCHING_FLAG="--skip_matching"
 fi
 
-if [ ! -z "$SINGLE_CAMERA" ]; then
-  SINGLE_CAMERA_FLAG="--single_camera"
+# NEW: Allow forcing feature re-extraction
+if [ ! -z "$FORCE_REEXTRACT" ]; then
+  FORCE_REEXTRACT_FLAG="--force_reextract"
 fi
 
 if [ ! -z "$CUSTOM_MASK_PATH" ]; then
@@ -65,7 +66,7 @@ python3 preprocess/tools/run_sfm.py \
   --camera "$CAMERA" \
   ${NO_GPU_FLAG} \
   ${SKIP_MATCHING_FLAG} \
-  ${SINGLE_CAMERA_FLAG} \
+  ${FORCE_REEXTRACT_FLAG} \
   ${COLMAP_EXECUTABLE:+--colmap_executable "$COLMAP_EXECUTABLE"} \
   ${GLOMAP_EXECUTABLE:+--glomap_executable "$GLOMAP_EXECUTABLE"} \
   ${MAGICK_EXECUTABLE:+--magick_executable "$MAGICK_EXECUTABLE"} \
