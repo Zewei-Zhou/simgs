@@ -150,14 +150,14 @@ def process_image(args, cam, pts, pipe, device):
     full_zero_mask = pred_dis != 0
     pred_dis[full_zero_mask] = pred_dis[full_zero_mask] * scale + offset
 
-    return pred_dis.cpu().numpy(), sfm_depth, scale.item()
+    return pred_dis.cpu().numpy(), sfm_depth, scale.item(), offset.item()
 
 async def save_results(
         depth_out_path, 
         sfm_depth_out_path,
         vis_depth_out_path, 
         vis_normal_out_path, 
-        image_name, pred_depth, sfm_depth, vis_depth, vis_normal, scale):
+        image_name, pred_depth, sfm_depth, vis_depth, vis_normal, scale, offset):
     # depth_file = os.path.join(depth_out_path, image_name[:-4] + ".png")
     depth_file = os.path.join(depth_out_path, os.path.splitext(image_name)[0] + ".png")
     sfm_depth_file = os.path.join(sfm_depth_out_path, image_name[:-4] + ".npz")
@@ -178,12 +178,12 @@ def process_batch(args, cam_batch, all_cams, pts, model_path, device):
     pipe = pipeline(task="depth-estimation", model=model_path, device=device)
     results = []
     for cam in cam_batch:
-        pred_dis, sfm_depth, scale = process_image(args, cam, pts, pipe, device)
+        pred_dis, sfm_depth, scale, offset = process_image(args, cam, pts, pipe, device)
         vis_depth = visualize_depth(pred_dis).permute(1, 2, 0).cpu().numpy()
         vis_normal = visualize_normal(pred_dis, cam).cpu().numpy()
         vis_depth = (vis_depth[:, :, :3] * 255).astype(np.uint8)
         vis_normal = (vis_normal[:, :, :3] * 255).astype(np.uint8)
-        results.append((os.path.basename(cam["image_path"]), pred_dis, sfm_depth, vis_depth, vis_normal, scale))
+        results.append((os.path.basename(cam["image_path"]), pred_dis, sfm_depth, vis_depth, vis_normal, scale, offset))
     return results
 
 @torch.no_grad()
@@ -224,7 +224,7 @@ def process(args):
             
             for res in results:
                 image_name_without_ext = os.path.splitext(res[0])[0]
-                depth_params[image_name_without_ext] = {"scale": res[-1]}
+                depth_params[image_name_without_ext] = {"scale": res[-2], "offset": res[-1]}
 
             loop = asyncio.get_event_loop()
             tasks = [save_results(depth_out_path, sfm_depth_out_path, vis_depth_out_path, vis_normal_out_path, *res) 

@@ -53,7 +53,8 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             packed=False,
             sh_degree=sh_degree,
             render_mode=pc.render_mode,
-            features=semantics.detach()
+            features=semantics.detach(),
+            tile_size=getattr(pipe, 'tile_size', 16)
         )
     elif pc.gs_attr == "2D":
         (render_colors, 
@@ -79,7 +80,8 @@ def render(viewpoint_camera, pc, pipe, bg_color, visible_mask=None, training=Tru
             packed=False,
             sh_degree=sh_degree,
             render_mode=pc.render_mode,
-            features=semantics.detach()
+            features=semantics.detach(),
+            tile_size=getattr(pipe, 'tile_size', 16)
         )
     else:
         raise ValueError(f"Unknown gs_attr: {pc.gs_attr}")
