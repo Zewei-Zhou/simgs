@@ -232,51 +232,95 @@ def storePly(path, xyz, rgb, label):
 def main():
     import os
     import time
-    dataset_path = "/data3/zewei/ObjectGS/waymo_example"
-    downscale = 1
+    import argparse
 
-    print(f"Starting processing of dataset at: {dataset_path}")
-    
-    # Check if dataset path exists
+    parser = argparse.ArgumentParser(description="Process COLMAP scenarios into PLYs.")
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default="/data3/zewei/ObjectGS/waymo_example",
+        help="Path to either the parent folder containing scenario folders OR a single scenario folder."
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="Optional: name of the specific scenario folder to process (basename). If provided, only this one will be processed."
+    )
+    parser.add_argument(
+        "--max_cores",
+        type=int,
+        default=8,
+        help="Maximum number of CPU cores to use for multiprocessing (default 8)."
+    )
+    args = parser.parse_args()
+
+    dataset_path = args.dataset_path
+    target = args.target
+    max_cores = args.max_cores
+
+    print(f"Starting processing with dataset_path: {dataset_path}, target: {target}")
+
     if not os.path.exists(dataset_path):
         print(f"Error: Dataset path {dataset_path} does not exist!")
         return
-    
-    dataset_folders = os.listdir(dataset_path)
-    print(f"Found {len(dataset_folders)} dataset folders: {dataset_folders}")
-    
+
+    # If dataset_path looks like a single scenario (has a 'sparse' folder), treat it as single scenario
+    if os.path.isdir(os.path.join(dataset_path, "sparse")):
+        dataset_root = os.path.dirname(dataset_path)
+        dataset_folders = [os.path.basename(dataset_path)]
+    else:
+        dataset_root = dataset_path
+        dataset_folders = sorted(os.listdir(dataset_root))
+
+    # If user provided --target, restrict to that one (name only)
+    if target:
+        if target in dataset_folders:
+            dataset_folders = [target]
+        else:
+            print(f"Warning: target '{target}' not found under {dataset_root}. Available: {dataset_folders}")
+            return
+
+    print(f"Found {len(dataset_folders)} dataset folders to process: {dataset_folders}")
+
     for dataset_folder in dataset_folders:
         print(f"\n{'='*50}")
         print(f"Processing {dataset_folder}...")
         start_time = time.time()
-        
-        label_image_dir = os.path.join(dataset_path, dataset_folder, 'object_mask')
-        output_ply_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/points3D_corr.ply')
-        camera_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/cameras.bin')
-        image_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/images.bin')
-        points3D_file = os.path.join(dataset_path, dataset_folder, 'sparse/0/points3D.bin')
+
+        folder_path = os.path.join(dataset_root, dataset_folder)
+
+        label_image_dir = os.path.join(folder_path, 'object_mask')
+        output_ply_file = os.path.join(folder_path, 'sparse/0/points3D_corr.ply')
+        camera_file = os.path.join(folder_path, 'sparse/0/cameras.bin')
+        image_file = os.path.join(folder_path, 'sparse/0/images.bin')
+        points3D_file = os.path.join(folder_path, 'sparse/0/points3D.bin')
 
         # Check if required files exist
         required_files = [camera_file, image_file, points3D_file, label_image_dir]
+        missing = False
         for file_path in required_files:
             if not os.path.exists(file_path):
                 print(f"Warning: Required file/directory not found: {file_path}")
-                continue
-        
+                missing = True
+        if missing:
+            print(f"Skipping {dataset_folder} due to missing files.")
+            continue
+
         print(f"Reading camera data from: {camera_file}")
         cameras = read_intrinsics_binary(camera_file)
         print(f"Read {len(cameras)} cameras")
-        
+
         print(f"Reading image data from: {image_file}")
         images = read_extrinsics_binary(image_file)
         print(f"Read {len(images)} images")
-        
+
         print(f"Reading points3D data from: {points3D_file}")
         points3D = read_points3D_binary(points3D_file)
         print(f"Read {len(points3D)} 3D points")
 
         # Use parallel processing with image caching
-        num_cores = min(mp.cpu_count(), 8)
+        num_cores = min(mp.cpu_count(), max_cores)
         print(f"Using {num_cores} CPU cores for parallel processing")
 
         converter = ID2RGBConverter()
@@ -286,7 +330,7 @@ def main():
 
         # Split points into batches for parallel processing
         points_items = list(points3D.items())
-        batch_size = max(1000, len(points_items) // (num_cores * 2))
+        batch_size = max(1000, len(points_items) // (num_cores * 2) if num_cores > 0 else len(points_items))
         batches = [points_items[i:i + batch_size] for i in range(0, len(points_items), batch_size)]
 
         print(f"Split into {len(batches)} batches")
@@ -326,7 +370,11 @@ def main():
         print(f"Output PLY contains {len(xyz)} points")
 
     print(f"\n{'='*50}")
-    print("All datasets processed successfully!")
+    print("All requested datasets processed successfully!")
 
 if __name__ == "__main__":
     main()
+
+
+# python ply_preprocessing.py --dataset_path /data3/zewei/ObjectGS/waymo_example
+# python ply_preprocessing.py --dataset_path /data3/zewei/ObjectGS/waymo_example --target 10275144660749673822_5755_561_5775_561-50colmap

@@ -7,7 +7,7 @@ scene_name=$(basename "$SCENE_DIR")
 
 if [ -d "$SCENE_DIR" ]; then
   echo "Training scene: $SCENE_DIR"
-    CUDA_VISIBLE_DEVICES=0 python train.py \
+    CUDA_VISIBLE_DEVICES=0 python train_vid2simloss.py \
     --config config/objectgs/2d/$scene_dataset/config.yaml \
     --scene_name $scene_name
 else

@@ -223,7 +223,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             visible_mask = prefilter_voxel(viewpoint_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask    
 
         # -----------------------Sky Render-----------------------------------
-        render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, training=True, object_mask=None, sky_model=sky_model)
+        # render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, training=True, object_mask=None, sky_model=sky_model)
+        render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background.cuda(), visible_mask, training=True, object_mask=None, sky_model=sky_model)
         #render_pkg = getattr(modules, 'render')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
         image, scaling, alpha, semantics = render_pkg["render"], render_pkg["scaling"], render_pkg["render_alphas"], render_pkg["render_semantics"]
 
@@ -598,8 +599,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                             loss_details.append(f"{name}: {loss_val.item():.6f}")
                         else:
                             loss_details.append(f"{name}: {loss_val:.6f}")
-                    if logger:
-                        logger.info(f"[ITER {iteration}] Loss breakdown: {', '.join(loss_details)}")
+                    # if logger:
+                        # logger.info(f"[ITER {iteration}] Loss breakdown: {', '.join(loss_details)}")
                     
             if iteration == opt.iterations:
                 progress_bar.close()

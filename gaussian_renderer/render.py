@@ -233,7 +233,7 @@ def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None,
         # Cf = C + (1-O)fsky(d)
 
         if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
-            sky_mask = viewpoint_cam.sky_mask.float()  # Original sky mask [1, H, W]
+            sky_mask = viewpoint_cam.sky_mask.float().to(T_bg.device)  # Original sky mask [1, H, W] - ensure same device as T_bg
             sky_mask_4d = sky_mask.unsqueeze(0)  # [1, 1, H, W]
             inv = 1.0 - sky_mask_4d  # [1, 1, H, W]
             inv_eroded = F.max_pool2d(inv, kernel_size=5, stride=1, padding=2)

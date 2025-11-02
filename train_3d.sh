@@ -2,19 +2,15 @@
 
 # Set the path to the scene directory
 SCENE_DIR=$1
-scene_dataset=$(basename "$SCENE_DIR")
+scene_dataset=$(basename "$(dirname "$SCENE_DIR")")
+scene_name=$(basename "$SCENE_DIR")
 
-# Iterate through all scene folders in the specified directory
-for scene in "$SCENE_DIR"/*; do
-  # Ensure only directories execute the training command
-  if [ -d "$scene" ]; then
-    # Execute the training command
-    echo "Training scene: $scene"
-    scene_name=$(basename "$scene")
-
-    # Run training on GPU 7
-    CUDA_VISIBLE_DEVICES=7 python train.py \
-      --config config/objectgs/3d/$scene_dataset/config.yaml \
-      --scene_name $scene_name
-  fi
-done
+if [ -d "$SCENE_DIR" ]; then
+  echo "Training scene: $SCENE_DIR"
+    CUDA_VISIBLE_DEVICES=0 python train_vid2simloss.py \
+    --config config/objectgs/3d/$scene_dataset/config.yaml \
+    --scene_name $scene_name
+else
+  echo "Error: Directory not found at $SCENE_DIR"
+  exit 1
+fi

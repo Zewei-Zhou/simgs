@@ -12,6 +12,7 @@ data
 tensorboard_3d
 screenshots
 *.so
+gsplat-object/*
 
 test_config/*scripts/*
 data/*
