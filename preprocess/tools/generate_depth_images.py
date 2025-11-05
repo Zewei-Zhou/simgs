@@ -47,6 +47,31 @@ def focal2fov(focal, pixels):
     """Calculates the field of view from focal length and pixel count."""
     return 2 * math.atan(pixels / (2 * focal))
 
+def find_image_path(path, image_name):
+    """Find image in gtimages or genimages subdirectories."""
+    # First try gtimages
+    gt_path = os.path.join(path, 'images', 'gtimages', image_name)
+    if os.path.exists(gt_path):
+        return gt_path
+    
+    # Then try genimages subdirectories
+    genimages_dir = os.path.join(path, 'images', 'genimages')
+    if os.path.exists(genimages_dir):
+        for subfolder in os.listdir(genimages_dir):
+            subfolder_path = os.path.join(genimages_dir, subfolder)
+            if os.path.isdir(subfolder_path):
+                gen_path = os.path.join(subfolder_path, image_name)
+                if os.path.exists(gen_path):
+                    return gen_path
+    
+    # Fallback: try old structure (images/ flat)
+    flat_path = os.path.join(path, 'images', image_name)
+    if os.path.exists(flat_path):
+        return flat_path
+    
+    print(f"Warning: Could not find image {image_name} in gtimages or genimages")
+    return None
+
 def readColmapSceneInfo(path):
     """Reads camera intrinsics and extrinsics for the COLMAP scene."""
     cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
@@ -55,6 +80,8 @@ def readColmapSceneInfo(path):
     cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
 
     cam_infos = []
+    not_found_count = 0
+    
     for idx, key in enumerate(cam_extrinsics):
         extr = cam_extrinsics[key]
         intr = cam_intrinsics[extr.camera_id]
@@ -79,7 +106,14 @@ def readColmapSceneInfo(path):
         else:
             assert False, f"Unsupported COLMAP camera model: {intr.model}"
 
-        image_path = os.path.join(path, 'images', os.path.basename(extr.name))
+        # Find image in gtimages or genimages subdirectories
+        image_name = os.path.basename(extr.name)
+        image_path = find_image_path(path, image_name)
+        
+        if image_path is None:
+            not_found_count += 1
+            continue  # Skip this camera if image not found
+            
         K = np.array([[focal_length_x, 0, width/2], [0, focal_length_y, height/2], [0, 0, 1]])
         
         # Create world-to-camera transformation matrix
@@ -97,112 +131,94 @@ def readColmapSceneInfo(path):
             "FovY": FovY, 
             "H": height, 
             "W": width,
-            "image_name": os.path.basename(extr.name)
+            "image_name": image_name
         }
         cam_infos.append(cam)
-        
-    print(f"\nSuccessfully read {len(cam_infos)} camera poses.")
+    
+    if not_found_count > 0:
+        print(f"\nWarning: {not_found_count} images not found in gtimages or genimages directories")
+    print(f"Successfully read {len(cam_infos)} camera poses.")
     return cam_infos
 
 @torch.no_grad()
 def process_image(cam, pts, pipe, device):
-    """Processes a single image to generate a depth map aligned with SfM points."""
+    """Processes a single image to generate a depth map aligned with SfM points.
+    Uses the depth calculation logic from generate_depth.py.
+    """
     K = torch.tensor(cam["K"], dtype=torch.float32, device=device)
-    w2c_matrix = torch.tensor(cam["c2w"], dtype=torch.float32, device=device)
+    c2w = torch.tensor(cam["c2w"], dtype=torch.float32, device=device)
     H, W = cam["H"], cam["W"]
-    
+
     # Transform world points to camera coordinates
     pts_tensor = torch.tensor(pts, dtype=torch.float32, device=device)
     pts_h = torch.cat([pts_tensor, torch.ones((pts_tensor.shape[0], 1), dtype=torch.float32, device=device)], dim=1)
+    pts_cam = torch.mm(c2w, pts_h.T).T
+    pts_cam = pts_cam[:, :3]
     
-    pts_in_cam_frame = torch.mm(w2c_matrix, pts_h.T).T[:, :3]
+    # Project to image plane
+    pts_cam = torch.mm(K, pts_cam.T).T
+    depth = pts_cam[:, 2]
+    pts_cam = pts_cam / (depth.unsqueeze(1) + 1e-9)
     
-    # Project points from camera frame to image plane
-    pts_proj = torch.mm(K, pts_in_cam_frame.T).T
-    depth = pts_proj[:, 2]
-    
-    # Normalize by depth to get pixel coordinates
-    pts_img = pts_proj[:, :2] / (depth.unsqueeze(1) + 1e-9)
-    
-    # Filter out points that are behind the camera or outside the image frame
+    # Filter valid points
     depth_mask = depth > 0
-    vis_mask = (pts_img[:, 0] >= 0) & (pts_img[:, 0] < W) & (pts_img[:, 1] >= 0) & (pts_img[:, 1] < H)
+    vis_mask = (pts_cam[:, 0] >= 0) & (pts_cam[:, 0] < W) & (pts_cam[:, 1] >= 0) & (pts_cam[:, 1] < H)
     mask = torch.logical_and(depth_mask, vis_mask)
     
-    # Keep only the valid SfM points and their depths
-    pts_img_valid = pts_img[mask]
-    depth_valid = depth[mask]
+    pts_cam = pts_cam[mask]
+    depth = depth[mask]
     
     # If there are no valid SfM points for this image, we cannot proceed with alignment.
-    if pts_img_valid.shape[0] < 10:
+    if pts_cam.shape[0] < 10:
         print(f"Warning: Less than 10 valid SfM points for image {cam['image_name']}. Skipping alignment.")
         # Return a zero depth map as a fallback
         return torch.zeros((H, W), dtype=torch.float32), {'depth': np.array([]), 'pts_cam': np.array([])}
-
-    sfm_depth = {
-        'depth': depth_valid.cpu().numpy(),
-        'pts_cam': pts_img_valid.cpu().numpy()
-    }
     
+    sfm_depth = {
+        'depth': depth.cpu().numpy(),
+        'pts_cam': pts_cam[:, :2].cpu().numpy()
+    }
+
     # Run the depth estimation model
     image = Image.open(cam["image_path"])
     result = pipe(image)
     pred_dis = result['predicted_depth'].to(device).squeeze(0)
     
-    # Ensure the predicted disparity map matches the original image dimensions
+    # Resize if needed
     pred_H, pred_W = pred_dis.shape
     if pred_H != H or pred_W != W:
         pred_dis = F.interpolate(pred_dis[None, None, ...], (H, W), mode='bilinear', align_corners=False)[0, 0]
     
-    # Normalize the predicted disparity for robust alignment
+    # Normalize the predicted disparity
     pred_dis = pred_dis / pred_dis.max()
     
-    # Sample predicted disparity values at the locations of the sparse SfM points
-    pred_dis_sparse = pred_dis[pts_img_valid[:, 1].long(), pts_img_valid[:, 0].long()]
+    # Sample predicted disparity at sparse points
+    pred_dis_sparse = pred_dis[pts_cam[:, 1].long(), pts_cam[:, 0].long()]
     
-    # Calculate SfM disparity (inverse depth)
-    sfm_dis = 1.0 / depth_valid
+    # Filter out zero values
+    zero_mask = pred_dis_sparse != 0
+    sfm_dis = 1.0 / depth
     
-    # Filter out any zero values which can corrupt the alignment
-    zero_mask = pred_dis_sparse > 1e-6
-    pred_dis_sparse_masked = pred_dis_sparse[zero_mask]
-    sfm_dis_masked = sfm_dis[zero_mask]
-    
-    scale, offset = 1.0, 0.0
-    if len(pred_dis_sparse_masked) > 10:
-        # Robustly align the predicted disparity to the SfM disparity
-        t_colmap = torch.median(sfm_dis_masked)
-        s_colmap = torch.mean(torch.abs(sfm_dis_masked - t_colmap))
-        
-        t_mono = torch.median(pred_dis_sparse_masked)
-        s_mono = torch.mean(torch.abs(pred_dis_sparse_masked - t_mono))
-        
-        if s_mono > 1e-6:
-            scale = s_colmap / s_mono
-            offset = t_colmap - t_mono * scale
-            
-    # Apply the calculated scale and offset to the entire disparity map
-    pred_dis_aligned = pred_dis * scale + offset
-    
-    # Convert the final aligned disparity map to a depth map
-    pred_depth = torch.zeros_like(pred_dis_aligned)
-    valid_disparity_mask = pred_dis_aligned > 1e-6
-    pred_depth[valid_disparity_mask] = 1.0 / pred_dis_aligned[valid_disparity_mask]
-    
-    # --- START: NEW ROBUSTNESS FIX ---
-    # Calculate a robust maximum depth from the SfM points
-    # This prevents the sky or far-away points from being pushed to infinity and dominating the depth range.
-    max_depth = np.percentile(depth_valid.cpu().numpy(), 99) * 1.5
-    
-    # Handle potential infinite values from the inversion
-    pred_depth = torch.nan_to_num(pred_depth, nan=0.0, posinf=max_depth)
-    
-    # Clip the depth map to the robust maximum depth and a minimum of 0
-    pred_depth = torch.clamp(pred_depth, 0, max_depth)
-    # --- END: NEW ROBUSTNESS FIX ---
+    pred_dis_sparse = pred_dis_sparse[zero_mask]
+    sfm_dis = sfm_dis[zero_mask]
 
-    return pred_depth, sfm_depth
+    # Calculate scale and offset using robust statistics
+    t_colmap = torch.median(sfm_dis)
+    s_colmap = torch.mean(torch.abs(sfm_dis - t_colmap))
 
+    t_mono = torch.median(pred_dis_sparse)
+    s_mono = torch.mean(torch.abs(pred_dis_sparse - t_mono))
+    
+    scale = s_colmap / s_mono
+    offset = t_colmap - t_mono * scale
+
+    # Apply scale and offset to the entire disparity map
+    full_zero_mask = pred_dis != 0
+    pred_dis[full_zero_mask] = pred_dis[full_zero_mask] * scale + offset
+
+    # Return disparity as the depth output (to match generate_depth.py behavior)
+    # The depth will be saved as-is
+    return pred_dis, sfm_depth
 
 def save_depth_as_png(output_path, image_name, pred_depth):
     """Saves the depth map as a 16-bit PNG file, scaled for Gaussian Splatting."""
@@ -293,7 +309,20 @@ def main_process(args):
     cam_infos = readColmapSceneInfo(path)
     
     # Sort cameras by image name for consistent processing order
-    cam_infos = sorted(cam_infos, key=lambda x: int(x['image_name'].split('.')[0]) if x['image_name'].split('.')[0].isdigit() else x['image_name'])
+    # Handle both numeric and string filenames
+    def sort_key(x):
+        name = x['image_name'].split('.')[0]
+        # Try to extract numeric part for proper sorting
+        # For gtimages: "00001" -> 1
+        # For genimages: "00010_forward_000000" -> extract frame number
+        import re
+        # Try to extract leading digits
+        match = re.match(r'(\d+)', name)
+        if match:
+            return int(match.group(1))
+        return name
+    
+    cam_infos = sorted(cam_infos, key=sort_key)
     
     # Generate and load the 3D point cloud from the sparse reconstruction
     ply_path = os.path.join(path, "sparse/0", "points3D.ply")

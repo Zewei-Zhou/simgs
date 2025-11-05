@@ -1,14 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import os
 import shutil
 import numpy as np
@@ -230,8 +219,13 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         gt_image = viewpoint_cam.original_image.cuda()
         alpha_mask = viewpoint_cam.alpha_mask.cuda()
-        image = image * alpha_mask
-        gt_image = gt_image * alpha_mask
+        if hasattr(viewpoint_cam, 'validity_mask') and viewpoint_cam.validity_mask is not None:
+            validity_mask = viewpoint_cam.validity_mask.cuda()
+        else:
+            validity_mask = torch.ones_like(alpha_mask)
+        final_loss_mask = alpha_mask * validity_mask
+        image = image * final_loss_mask
+        gt_image = gt_image * final_loss_mask
 
         losses = dict()
 
@@ -295,7 +289,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     semantics_2d = semantics
                 
                 # Apply alpha mask to focus on valid regions
-                valid_mask = alpha_mask.squeeze().bool()  # [H, W]
+                valid_mask = final_loss_mask.squeeze().bool()  # [H, W]
                 
                 if valid_mask.sum() > 0:
                     # Get valid regions only - use proper 2D indexing
@@ -435,7 +429,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if opt.lambda_sky_opa > 0 and hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
             sky_losses = sky_loss_manager.compute_losses(
                 pred_opacity=render_pkg["render_alphas"],
-                sky_masks=viewpoint_cam.sky_mask.squeeze().cuda()
+                sky_masks=viewpoint_cam.sky_mask.squeeze().cuda(),
+                alpha_masks=alpha_mask.squeeze(),
+                validity_mask=validity_mask.squeeze()
             )
             for loss_name, loss_value in sky_losses.items():
                 losses[loss_name] = loss_value
@@ -456,11 +452,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 normals_from_depth = normals_from_depth.squeeze(0)
             normals_from_depth = normals_from_depth.permute((2, 0, 1))
             normal_error = (1 - (normals * normals_from_depth).sum(dim=0))[None]
-            losses["normal_loss"] = opt.lambda_normal * (normal_error * alpha_mask).mean()
+            losses["normal_loss"] = opt.lambda_normal * (normal_error * final_loss_mask).mean()
 
         # Distortion loss
         if opt.lambda_dist and iteration > opt.dist_start_iter:
-            losses["distort_loss"] = opt.lambda_dist * (render_pkg["render_distort"].squeeze(3) * alpha_mask).mean()
+            losses["distort_loss"] = opt.lambda_dist * (render_pkg["render_distort"].squeeze(3) * final_loss_mask).mean()
         
         # Depth loss
         if iteration > opt.start_depth and depth_l1_weight(iteration) > 0 and viewpoint_cam.invdepthmap is not None:
@@ -469,7 +465,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             invDepth = torch.where(render_depth > 0.0, 1.0 / render_depth, torch.zeros_like(render_depth))            
             mono_invdepth = viewpoint_cam.invdepthmap.cuda()
             depth_mask = viewpoint_cam.depth_mask.cuda()
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+            final_depth_mask = depth_mask * validity_mask
+            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * final_depth_mask).mean()
             Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
             losses["depth_loss"] = Ll1depth
             Ll1depth = Ll1depth.item()
@@ -511,7 +508,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                             normals = normals.permute(2, 0, 1)
                         
                         # Prepare combined mask
-                        combined_mask = alpha_mask.float() * inf_depth_mask
+                        combined_mask = final_loss_mask.float() * inf_depth_mask
                         
                         # Only proceed if we have valid masked region
                         if combined_mask.sum() > 100:  # At least 100 valid pixels
@@ -747,8 +744,13 @@ def training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_l
                     image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     alpha_mask = viewpoint.alpha_mask.cuda()
-                    image = image * alpha_mask
-                    gt_image = gt_image * alpha_mask
+                    if hasattr(viewpoint, 'validity_mask') and viewpoint.validity_mask is not None:
+                        validity_mask = viewpoint.validity_mask.cuda()
+                    else:
+                        validity_mask = torch.ones_like(alpha_mask)
+                    final_eval_mask = alpha_mask * validity_mask
+                    image = image * final_eval_mask
+                    gt_image = gt_image * final_eval_mask
                     
                     if tb_writer and (idx < 30):
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)

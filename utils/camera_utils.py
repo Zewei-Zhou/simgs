@@ -49,7 +49,8 @@ def loadCam(args, id, cam_info, resolution_scale, background):
     
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, Cx=cam_info.CX, Cy=cam_info.CY, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, resolution_scale=resolution_scale, image=cam_info.image, 
-                  alpha_mask=cam_info.mask, sky_mask=cam_info.sky_mask, image_name=cam_info.image_name, image_path=cam_info.image_path, 
+                  alpha_mask=cam_info.mask, sky_mask=cam_info.sky_mask, validity_mask=cam_info.validity_mask,
+                  image_name=cam_info.image_name, image_path=cam_info.image_path, 
                   uid=id, data_device=args.data_device,data_format=args.data_format, gt_depth=cam_info.depth, depth_params=cam_info.depth_params)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, background):

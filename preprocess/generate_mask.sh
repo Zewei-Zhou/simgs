@@ -5,8 +5,8 @@ MASK_PROMPT="road.sidewalk.building.house.fence.tree.car.truck.bicycle.person.ri
 # Generate dynamic masks from SAM2 (recommended)
 python preprocess/tools/generate_mask_sam2.py \
 --text_prompt "$MASK_PROMPT" \
---video_dir $1/images \
---output_dir $1/tmp \
+--images_root_dir $1/images \
+--output_base_dir $1/tmp \
 --generate_sky_masks
 # --sky_only 
 

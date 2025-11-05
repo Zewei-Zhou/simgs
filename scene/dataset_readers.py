@@ -1,14 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import os
 import glob
 import sys
@@ -50,6 +39,7 @@ class CameraInfo(NamedTuple):
     image_name: str
     width: int
     height: int
+    validity_mask: np.array
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -161,9 +151,105 @@ def storePly(path, xyz, rgb, label_ids):
     vertex_element = PlyElement.describe(elements, 'vertex')
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
+
+def scan_all_images_in_folders(images_folder):
+    """
+    Scan all images from gtimages and genimages folders.
+    Returns a dict mapping image_name -> full_image_path
+    
+    Structure:
+    - images/gtimages/*.jpg
+    - images/genimages/1/*.jpg, 2/*.jpg, 3/*.jpg, etc.
+    """
+    image_map = {}
+    
+    # Check flat structure first (legacy support)
+    if os.path.exists(images_folder):
+        for item in os.listdir(images_folder):
+            item_path = os.path.join(images_folder, item)
+            if os.path.isfile(item_path) and item.lower().endswith(('.jpg', '.jpeg', '.png')):
+                # Legacy flat structure - use this and return immediately
+                image_map[item] = item_path
+        
+        if image_map:
+            return image_map
+    
+    # Scan gtimages folder
+    gt_folder = os.path.join(images_folder, "gtimages")
+    if os.path.exists(gt_folder) and os.path.isdir(gt_folder):
+        for item in os.listdir(gt_folder):
+            if item.lower().endswith(('.jpg', '.jpeg', '.png')):
+                image_map[item] = os.path.join(gt_folder, item)
+    
+    # Scan genimages subfolders
+    gen_seq_folder = os.path.join(images_folder, "genimages")
+    if os.path.exists(gen_seq_folder) and os.path.isdir(gen_seq_folder):
+        try:
+            subfolders = [f for f in os.listdir(gen_seq_folder) 
+                         if os.path.isdir(os.path.join(gen_seq_folder, f))]
+            # Sort subfolders numerically
+            try:
+                subfolders = sorted(subfolders, key=lambda x: int(x) if x.isdigit() else x)
+            except:
+                subfolders = sorted(subfolders)
+            
+            for subfolder in subfolders:
+                subfolder_path = os.path.join(gen_seq_folder, subfolder)
+                for item in os.listdir(subfolder_path):
+                    if item.lower().endswith(('.jpg', '.jpeg', '.png')):
+                        # Store with full path
+                        image_map[item] = os.path.join(subfolder_path, item)
+        except Exception as e:
+            print(f"Warning: Error scanning genimages folder: {e}")
+    
+    return image_map
+
+def get_genimages_mask_path(image_path, images_folder):
+    """
+    Get the mask path for a genimages image.
+    If image is in images/genimages/1/*.jpg, mask is in images/genimages/1_mask/*.jpg
+    If image is in images/genimages/2/*.jpg, mask is in images/genimages/2_mask/*.jpg
+    Returns None if not a genimages image or mask doesn't exist.
+    """
+    # Check if this is a genimages image
+    if "genimages" not in image_path:
+        return None
+    
+    # Extract the sequence number (1, 2, 3, etc.)
+    try:
+        parts = image_path.split(os.sep)
+        gen_seq_idx = parts.index("genimages")
+        if gen_seq_idx + 1 < len(parts):
+            seq_num = parts[gen_seq_idx + 1]
+            image_name = os.path.basename(image_path)
+            
+            # Construct mask path: images_folder/genimages/seq_num_mask/image_name
+            gen_seq_folder = os.path.join(images_folder, "genimages")
+            mask_folder = os.path.join(gen_seq_folder, f"{seq_num}_mask")
+            mask_path = os.path.join(mask_folder, image_name)
+            
+            if os.path.exists(mask_path):
+                return mask_path
+    except (ValueError, IndexError):
+        pass
+    
+    return None
     
 def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, masks_folder, depths_folder, sky_masks_folder=None):
     cam_infos = []
+    
+    # First, scan all available images in gtimages and genimages folders
+    print(f"Scanning images in {images_folder}...")
+    image_map = scan_all_images_in_folders(images_folder)
+    print(f"Found {len(image_map)} images in total")
+    
+    # Debug: print sample of image_map keys and COLMAP names
+    if len(image_map) > 0:
+        sample_keys = list(image_map.keys())[:3]
+        print(f"Sample image_map keys: {sample_keys}")
+    
+    sample_colmap_names = [cam_extrinsics[key].name for key in list(cam_extrinsics.keys())[:3]]
+    print(f"Sample COLMAP names: {sample_colmap_names}")
     
     def process_frame(idx, key):
         extr = cam_extrinsics[key]
@@ -189,26 +275,76 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         else:
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
         
-        image_path = os.path.join(images_folder, extr.name)
-        if not os.path.exists(image_path):
+        # Look up image path from the image_map using COLMAP image name
+        # Try direct match first
+        image_path = None
+        if extr.name in image_map:
+            image_path = image_map[extr.name]
+        else:
+            # Try matching with basename only (in case COLMAP stores paths like "gtimages/00010.jpg")
+            basename = os.path.basename(extr.name)
+            if basename in image_map:
+                image_path = image_map[basename]
+            else:
+                # Try without extension matching (e.g., .jpg vs .png)
+                name_without_ext = os.path.splitext(basename)[0]
+                for key in image_map.keys():
+                    if os.path.splitext(key)[0] == name_without_ext:
+                        image_path = image_map[key]
+                        break
+        
+        if image_path is None:
+            # Debug: print for first few mismatches
+            if idx < 3:
+                print(f"Warning: COLMAP image '{extr.name}' not found in image_map")
+                print(f"  Tried: direct match, basename '{os.path.basename(extr.name)}', and extension-agnostic matching")
             return None
-        image_name = os.path.basename(image_path).split(".")[0]
+        
+        image_name = os.path.splitext(os.path.basename(image_path))[0]
         image = Image.open(image_path)
         
         depth_params = None
         if depths_params is not None:
             try:
-                depth_params = depths_params[extr.name.split(".")[0]]
+                # Use the image_name (without extension) as the key
+                depth_params = depths_params[image_name]
             except:
-                print("\n", key, "not found in depths_params")
+                # Try with original COLMAP name if the first attempt fails
+                try:
+                    colmap_basename = os.path.splitext(os.path.basename(extr.name))[0]
+                    depth_params = depths_params[colmap_basename]
+                except:
+                    if idx < 3:  # Only print for first few mismatches
+                        print(f"\nWarning: depth_params not found for '{image_name}' or '{colmap_basename}'")
+        
+        # Load masks with distinction between alpha_mask and validity_mask
+        # For genimages: validity_mask is from masks/genimages/, alpha_mask is from object_mask/
+        # For gtimages: alpha_mask is from object_mask/, validity_mask is None
+        mask = None
+        validity_mask = None
+        
+        gen_mask_path = get_genimages_mask_path(image_path, images_folder)
+        if gen_mask_path is not None:
+            # This is a genimages image - load validity mask
+            validity_mask = Image.open(gen_mask_path)
+        
+        # Load alpha_mask from standard masks_folder for all images
+        # Use the basename of image_path to ensure correct filename
+        image_basename_with_ext = os.path.basename(image_path)
+        
         if masks_folder is not None:
-            mask_path = os.path.join(masks_folder, extr.name)
-            mask = Image.open(mask_path)
-        else:   
-            mask = None
+            mask_path = os.path.join(masks_folder, image_basename_with_ext)
+            # Try with .png extension if not found
+            if not os.path.exists(mask_path):
+                mask_path = os.path.join(masks_folder, os.path.splitext(image_basename_with_ext)[0] + ".png")
+            if os.path.exists(mask_path):
+                mask = Image.open(mask_path)
             
         if sky_masks_folder is not None:
-            sky_mask_path = os.path.join(sky_masks_folder, extr.name)
+            sky_mask_path = os.path.join(sky_masks_folder, image_basename_with_ext)
+            # Try with .png extension if not found
+            if not os.path.exists(sky_mask_path):
+                sky_mask_path = os.path.join(sky_masks_folder, os.path.splitext(image_basename_with_ext)[0] + ".png")
             if os.path.exists(sky_mask_path):
                 sky_mask = Image.open(sky_mask_path).convert("L")
             else:
@@ -217,9 +353,12 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             sky_mask = None
             
         if depths_folder is not None:
-            depth_path = os.path.join(depths_folder, str(Path(extr.name).with_suffix(".png"))) 
-            # depth_path = os.path.join(depths_folder, extr.name.replace(".jpg", ".png")) 
-            depth = cv2.imread(depth_path, -1).astype(np.float32) / float(2**16)
+            # Use image_name (without extension) and add .png
+            depth_path = os.path.join(depths_folder, image_name + ".png")
+            if os.path.exists(depth_path):
+                depth = cv2.imread(depth_path, -1).astype(np.float32) / float(2**16)
+            else:
+                depth = None
         else:
             depth = None
 
@@ -239,7 +378,8 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
             image_path=image_path, 
             image_name=image_name, 
             width=width, 
-            height=height
+            height=height,
+            validity_mask=validity_mask
         )
 
     ct = 0
@@ -250,9 +390,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
 
         for future in concurrent.futures.as_completed(futures):
             cam_info = future.result()
-            if cam_info is None:
-                continue
-            else:
+            if cam_info is not None:
                 cam_infos.append(cam_info)
             
             ct+=1
@@ -263,12 +401,18 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         progress_bar.close()
 
     cam_infos = sorted(cam_infos, key = lambda x : x.image_path)
+    print(f"Loaded {len(cam_infos)} images (from COLMAP extrinsics: {len(cam_extrinsics)})")
     return cam_infos
 
 def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center, scale, depth_type='ue', depths_params=None):
 
     cam_infos = []
     test_cam_infos = []
+    
+    # Scan all available images
+    images_folder = os.path.join(path, "images")
+    image_map = scan_all_images_in_folders(images_folder)
+    
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         # fovx = contents["camera_angle_x"]
@@ -279,6 +423,15 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
         
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
+            # Get image filename from frame
+            image_filename = os.path.basename(frame["file_path"])
+            
+            # Look up in image_map
+            if image_filename not in image_map:
+                print(f"Warning: Image {image_filename} not found in scanned images")
+                continue
+            
+            image_path = image_map[image_filename]
             cam_name = os.path.join("images", frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform
@@ -292,7 +445,6 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
             T = w2c[:3, 3]
 
-            image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
@@ -300,12 +452,28 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             FovX = focal2fov(fl_x, image.size[0])
             CX = cx
             CY = cy
+            
+            # Load mask - check if it's a genimages image first
+            mask = None
+            validity_mask = None
+            gen_mask_path = get_genimages_mask_path(image_path, images_folder)
+            if gen_mask_path is not None:
+                validity_mask = Image.open(gen_mask_path)
 
-            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, sky_mask=None, depth=None, depth_params=None,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=mask, sky_mask=None, depth=None, depth_params=None,
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1], validity_mask=validity_mask))
 
         test_frames = contents["test_frames"]
         for idx, frame in enumerate(test_frames):
+            # Get image filename from frame
+            image_filename = os.path.basename(frame["file_path"])
+            
+            # Look up in image_map
+            if image_filename not in image_map:
+                print(f"Warning: Test image {image_filename} not found in scanned images")
+                continue
+            
+            image_path = image_map[image_filename]
             cam_name = os.path.join("images", frame["file_path"])
 
             # NeRF 'transform_matrix' is a camera-to-world transform
@@ -320,7 +488,6 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
             T = w2c[:3, 3]
 
-            image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
@@ -328,12 +495,20 @@ def readCamerasFromTransforms(path, transformsfile, add_mask, add_depth, center,
             FovX = focal2fov(fl_x, image.size[0])
             CX = cx
             CY = cy
+            
+            # Load mask - check if it's a genimages image first
+            mask = None
+            validity_mask = None
+            gen_mask_path = get_genimages_mask_path(image_path, images_folder)
+            if gen_mask_path is not None:
+                validity_mask = Image.open(gen_mask_path)
 
-            test_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=None, sky_mask=None, depth=None, depth_params=None,
-                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
+            test_cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, CX=CX, CY=CY, image=image, mask=mask, sky_mask=None, depth=None, depth_params=None,
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1], validity_mask=validity_mask))
 
     cam_infos = sorted(cam_infos, key = lambda x : x.image_path)
     test_cam_infos = sorted(test_cam_infos, key= lambda x : x.image_path)
+    print(f"Loaded {len(cam_infos)} training images and {len(test_cam_infos)} test images")
     return cam_infos, test_cam_infos
 
 def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, llffhold=32, sky_masks=None, add_sky_mask=False):
@@ -380,61 +555,83 @@ def readColmapSceneInfo(path, eval, images, depths, masks, add_mask, add_depth, 
     depth_dir = os.path.join(path, depths) if add_depth else None
     sky_mask_dir = os.path.join(path, sky_masks) if add_sky_mask and sky_masks else None
     cam_infos = readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, reading_dir, mask_dir, depth_dir, sky_mask_dir)
-    
-    if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-
-        if "lerf" in path:
-            if "waldo_kitchen" in path:
-                test_frame = ["frame_00053", "frame_00066", "frame_00089", "frame_00140", "frame_00154"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "ramen" in path:
-                test_frame = ["frame_00006", "frame_00024", "frame_00060", "frame_00065", "frame_00081", "frame_00119", "frame_00128"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "figurines" in path:
-                test_frame = ["frame_00041", "frame_00105", "frame_00152", "frame_00195"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "teatime" in path:
-                test_frame = ["frame_00002", "frame_00025", "frame_00043", "frame_00107", "frame_00129", "frame_00140"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-        if "3dovs" in path:
-            if "bed" in path:
-                test_frame = ["00", "04", "10", "23", "30"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "bench" in path:
-                test_frame = ["02", "05", "25", "27", "32"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "blue_sofa" in path:
-                test_frame = ["03", "05", "13", "24", "27"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "covered_desk" in path:
-                test_frame = ["00", "01", "11", "26", "29"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "lawn" in path:
-                test_frame = ["01", "03", "09", "13", "29"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "office_desk" in path:
-                test_frame = ["03", "07", "12", "14", "20"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "room" in path:
-                test_frame = ["00", "04", "19", "25", "30"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "snacks" in path:
-                test_frame = ["04", "08", "18", "26", "40"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "sofa" in path:
-                test_frame = ["02", "04", "10", "15", "22"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
-            elif "table" in path:
-                test_frame = ["00", "02", "14", "26", "30"]
-                test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]            
+    gtimages_cams = []
+    genimages_cams = []
+    for cam in cam_infos:
+        # We can check the path, which is stored in the CameraInfo object
+        if "genimages" in cam.image_path:
+            genimages_cams.append(cam)
         else:
-            test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+            gtimages_cams.append(cam)
+
+    print(f"Loaded {len(gtimages_cams)} gtimages images and {len(genimages_cams)} genimages images.")
+
+    if eval:
+        gt_train = []
+        gt_test = []
+        for idx, cam in enumerate(gtimages_cams):
+            if idx % llffhold == 0:
+                gt_test.append(cam)
+            else:
+                gt_train.append(cam)
+        train_cam_infos = gt_train + genimages_cams
+        test_cam_infos = gt_test
+        print(f"Final splitting result: {len(train_cam_infos)} training images ({len(gt_train)} GT + {len(genimages_cams)} Gen), {len(test_cam_infos)} testing images.")
+
+
+        # train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+
+        # if "lerf" in path:
+        #     if "waldo_kitchen" in path:
+        #         test_frame = ["frame_00053", "frame_00066", "frame_00089", "frame_00140", "frame_00154"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "ramen" in path:
+        #         test_frame = ["frame_00006", "frame_00024", "frame_00060", "frame_00065", "frame_00081", "frame_00119", "frame_00128"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "figurines" in path:
+        #         test_frame = ["frame_00041", "frame_00105", "frame_00152", "frame_00195"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "teatime" in path:
+        #         test_frame = ["frame_00002", "frame_00025", "frame_00043", "frame_00107", "frame_00129", "frame_00140"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        # if "3dovs" in path:
+        #     if "bed" in path:
+        #         test_frame = ["00", "04", "10", "23", "30"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "bench" in path:
+        #         test_frame = ["02", "05", "25", "27", "32"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "blue_sofa" in path:
+        #         test_frame = ["03", "05", "13", "24", "27"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "covered_desk" in path:
+        #         test_frame = ["00", "01", "11", "26", "29"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "lawn" in path:
+        #         test_frame = ["01", "03", "09", "13", "29"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "office_desk" in path:
+        #         test_frame = ["03", "07", "12", "14", "20"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "room" in path:
+        #         test_frame = ["00", "04", "19", "25", "30"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "snacks" in path:
+        #         test_frame = ["04", "08", "18", "26", "40"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "sofa" in path:
+        #         test_frame = ["02", "04", "10", "15", "22"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]
+        #     elif "table" in path:
+        #         test_frame = ["00", "02", "14", "26", "30"]
+        #         test_cam_infos = [c for idx, c in enumerate(cam_infos) if c.image_name in test_frame]            
+        # else:
+        #     test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
-        # train_cam_infos = cam_infos
-        # test_cam_infos = []
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if "test" not in c.image_name]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if "test" in c.image_name]
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+        # train_cam_infos = [c for idx, c in enumerate(cam_infos) if "test" not in c.image_name]
+        # test_cam_infos = [c for idx, c in enumerate(cam_infos) if "test" in c.image_name]
 
 
     nerf_normalization = getNerfppNorm(train_cam_infos)

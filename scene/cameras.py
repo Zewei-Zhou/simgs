@@ -22,7 +22,7 @@ class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, Cx, Cy, FoVx, FoVy, image, alpha_mask, 
                  image_name, image_path, resolution_scale, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 data_format='matrixcity',gt_depth=None, depth_params=None, sky_mask=None
+                 data_format='matrixcity',gt_depth=None, depth_params=None, sky_mask=None, validity_mask=None
                  ):
         super(Camera, self).__init__()
 
@@ -62,6 +62,17 @@ class Camera(nn.Module):
             self.sky_mask = (self.sky_mask > 0.5).float()  # Binarize: 1 for sky, 0 for non-sky
         else:
             self.sky_mask = torch.zeros_like(resized_image_rgb[0:1, ...].to(self.data_device))
+        
+        # Handle validity mask (for generated images)
+        if validity_mask is not None:
+            self.validity_mask = PILtoTorch(validity_mask, resolution).to(self.data_device)
+            # Ensure validity mask is in [0, 1] range and single channel
+            if self.validity_mask.shape[0] > 1:
+                self.validity_mask = self.validity_mask.mean(dim=0, keepdim=True)
+            # Binarize: 1 for valid/real pixels, 0 for invalid/generated pixels
+            self.validity_mask = (self.validity_mask > 0.5).float()
+        else:
+            self.validity_mask = None
     
         self.invdepthmap = None # use invdepth to avoid the floater in near places
         self.original_image = gt_image.clamp(0.0, 1.0).to(self.data_device)
@@ -111,14 +122,42 @@ class Camera(nn.Module):
         self.fy = self.image_height / (2 * np.tan(self.FoVy * 0.5))
         self.c2w = self.world_view_transform.transpose(0, 1).inverse()
 
-        if "3dovs" in image_path:
-            object_mask = Image.open(image_path.replace("images", "object_mask_deva").replace(".jpg", ".png")).convert('L')
-        elif "replica" in image_path:
-            object_mask = Image.open(image_path.replace("images_all", "object_mask").replace(".jpg", ".png")).convert('L')
-        elif "scannet" in image_path:
-            object_mask = Image.open(image_path.replace("images", "object_mask").replace(".JPG", ".png")).convert('L')
+        # Load object mask - handle both flat and nested image structures
+        # For nested structures (images/gtimages/ or images/genimages/),
+        # the object_mask should still be in the flat object_mask/ directory
+        import os
+        image_basename = os.path.basename(image_path)
+        image_dirname = os.path.dirname(image_path)
+        
+        # Find the base path (go up to find 'images' directory)
+        if 'images' in image_dirname:
+            # Split path to find base directory
+            parts = image_dirname.split(os.sep)
+            try:
+                images_idx = parts.index('images')
+                base_path = os.sep.join(parts[:images_idx])
+            except ValueError:
+                # Fallback to simple replacement
+                base_path = image_dirname.replace('/images', '').replace('\\images', '')
         else:
-            object_mask = Image.open(image_path.replace("images", "object_mask").replace(".jpg", ".png")).convert('L')
+            base_path = image_dirname
+        
+        # Construct object_mask path
+        if "3dovs" in image_path:
+            mask_folder = "object_mask_deva"
+        elif "replica" in image_path:
+            # For replica, base might be 'images_all' instead of 'images'
+            base_path = image_dirname.replace('/images_all', '').replace('\\images_all', '')
+            mask_folder = "object_mask"
+        elif "scannet" in image_path:
+            mask_folder = "object_mask"
+            image_basename = image_basename.replace(".JPG", ".png").replace(".jpg", ".png")
+        else:
+            mask_folder = "object_mask"
+            image_basename = image_basename.replace(".jpg", ".png").replace(".JPG", ".png").replace(".jpeg", ".png")
+        
+        object_mask_path = os.path.join(base_path, mask_folder, image_basename)
+        object_mask = Image.open(object_mask_path).convert('L')
         object_mask = np.array(object_mask.resize(resolution), dtype=np.uint8)
         self.object_mask = torch.from_numpy(object_mask)
 

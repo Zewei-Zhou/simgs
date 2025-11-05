@@ -1,9 +1,39 @@
+"""
+PLY Preprocessing Script for ObjectGS
+
+This script processes COLMAP 3D point clouds and assigns object labels based on 2D masks.
+It supports both ground truth images and generated images, with special handling for 
+generated images to filter out "unreal" pixels.
+
+Key Features:
+1. Scans all images from gtimages/ and genimages/ folders
+2. For generated images, loads validity masks from masks/genimages/{xxxxx_forward}/
+3. Filters out unreal pixels (mask == 0) from voting process
+4. Assigns object labels to 3D points through multi-view voting
+5. Outputs labeled point cloud as PLY file
+
+Data Structure:
+- images/gtimages/*.jpg                              - Ground truth images
+- images/genimages/xxxxx_forward/*.png               - Generated images (starting from frame xxxxx)
+- masks/genimages/xxxxx_forward/*.png                - Validity masks for generated images
+- object_mask/*.png                                  - Object segmentation masks
+- sparse/0/cameras.bin                               - Camera intrinsics
+- sparse/0/images.bin                                - Camera extrinsics
+- sparse/0/points3D.bin                              - 3D point cloud
+
+Usage:
+    python ply_preprocessing.py --dataset_path /path/to/dataset
+    python ply_preprocessing.py --dataset_path /path/to/dataset --target specific_scene
+    python ply_preprocessing.py --dataset_path /path/to/dataset --max_cores 16
+"""
+
 import struct
 import numpy as np
 import cv2
 from collections import Counter, defaultdict
 from plyfile import PlyData, PlyElement
 from scene.colmap_loader import read_intrinsics_binary, read_extrinsics_binary
+from scene.dataset_readers import scan_all_images_in_folders
 import multiprocessing as mp
 from multiprocessing import Pool
 import os
@@ -126,9 +156,38 @@ class ImageCache:
         return self.cache[image_path]
 
 
+def get_genimages_mask_path(image_path, dataset_root):
+    """
+    Get the mask path for a genimages image.
+    If image is in images/genimages/xxxxx_forward/*.png, 
+    mask is in masks/genimages/xxxxx_forward/*.png
+    Returns None if not a genimages image or mask doesn't exist.
+    """
+    # Check if this is a genimages image
+    if "genimages" not in image_path:
+        return None
+    
+    # Replace images/genimages/ with masks/genimages/
+    try:
+        # Find the dataset root by going up from images folder
+        if "/images/genimages/" in image_path:
+            mask_path = image_path.replace("/images/genimages/", "/masks/genimages/")
+        elif "\\images\\genimages\\" in image_path:
+            mask_path = image_path.replace("\\images\\genimages\\", "\\masks\\genimages\\")
+        else:
+            return None
+        
+        if os.path.exists(mask_path):
+            return mask_path
+    except Exception as e:
+        print(f"Warning: Error constructing mask path for {image_path}: {e}")
+    
+    return None
+
+
 def process_points_batch(args):
     """Process a batch of 3D points in parallel"""
-    points_batch, images, label_image_dir, converter, image_cache = args
+    points_batch, images, label_image_dir, converter, image_cache, image_map, dataset_root = args
     local_colors = []
     local_labels = []
 
@@ -139,13 +198,9 @@ def process_points_batch(args):
             if image_id not in images:
                 continue
 
-            # --- FIX STARTS HERE ---
-            # 1. Read the stored name, which might contain a path
+            # Get the stored image name
             _, _, _, _, stored_image_name, xys, _ = images[image_id]
-
-            # 2. Use os.path.basename() to get only the filename
             image_name = os.path.basename(stored_image_name)
-            # --- FIX ENDS HERE ---
 
             if point2D_idx >= len(xys):
                 continue
@@ -153,7 +208,31 @@ def process_points_batch(args):
             u, v = xys[point2D_idx]
             u, v = int(round(u)), int(round(v))
 
+            # Get the actual image path from image_map
+            if image_name not in image_map:
+                continue
+            
+            image_path = image_map[image_name]
+            
+            # Check if this is a genimages image and load its validity mask
+            gen_mask_path = get_genimages_mask_path(image_path, dataset_root)
+            if gen_mask_path is not None:
+                # This is a generated image, check validity mask
+                validity_mask = image_cache.get(gen_mask_path)
+                if validity_mask is None:
+                    continue
+                
+                # Check if the pixel is valid (mask > 0 means valid/real)
+                if v < 0 or v >= validity_mask.shape[0] or u < 0 or u >= validity_mask.shape[1]:
+                    continue
+                
+                # Skip unreal pixels (mask == 0)
+                if validity_mask[v, u] == 0:
+                    continue  # This pixel is "unreal", skip it from voting
+            
+            # Load object mask (label image) - all images use the same object_mask folder
             label_image_file = os.path.join(label_image_dir, image_name)
+            
             # The replace logic remains the same
             label_image_file = label_image_file.replace('.jpg', '.png') if label_image_file.endswith('.jpg') else label_image_file.replace('.JPG', '.png')
 
@@ -238,7 +317,7 @@ def main():
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/data3/zewei/ObjectGS/waymo_example",
+        default="/data3/zewei/ObjectGS/waymo_example/10061305430875486848_1080_000_1100_000-50colmap-gengt",
         help="Path to either the parent folder containing scenario folders OR a single scenario folder."
     )
     parser.add_argument(
@@ -319,6 +398,18 @@ def main():
         points3D = read_points3D_binary(points3D_file)
         print(f"Read {len(points3D)} 3D points")
 
+        # Scan all images (gtimages and genimages)
+        images_folder = os.path.join(folder_path, 'images')
+        print(f"Scanning images in {images_folder}...")
+        image_map = scan_all_images_in_folders(images_folder)
+        print(f"Found {len(image_map)} images in total (gtimages + genimages)")
+        
+        # Count gtimages vs genimages
+        gt_count = sum(1 for path in image_map.values() if 'gtimages' in path)
+        gen_count = sum(1 for path in image_map.values() if 'genimages' in path)
+        print(f"  - Ground truth images: {gt_count}")
+        print(f"  - Generated images: {gen_count}")
+
         # Use parallel processing with image caching
         num_cores = min(mp.cpu_count(), max_cores)
         print(f"Using {num_cores} CPU cores for parallel processing")
@@ -340,7 +431,7 @@ def main():
         all_labels = []
 
         with Pool(processes=num_cores) as pool:
-            args_list = [(batch, images, label_image_dir, converter, image_cache) for batch in batches]
+            args_list = [(batch, images, label_image_dir, converter, image_cache, image_map, folder_path) for batch in batches]
             results = pool.map(process_points_batch, args_list)
 
             for batch_colors, batch_labels in results:
@@ -348,7 +439,17 @@ def main():
                 all_labels.extend(batch_labels)
 
         print(f"Processed {len(all_colors)} color mappings, {len(all_labels)} label mappings")
-        print(f"Cached {len(image_cache.cache)} images")
+        print(f"Cached {len(image_cache.cache)} images (including validity masks)")
+        
+        # Calculate how many observations were used
+        total_observations_possible = sum(len(point_data[7]) for point_data in points3D.values())
+        observations_used = len(all_colors)
+        observations_filtered = total_observations_possible - observations_used
+        print(f"Total possible observations: {total_observations_possible}")
+        print(f"Observations used for voting: {observations_used}")
+        print(f"Observations filtered out (unreal pixels from genimages): {observations_filtered}")
+        if total_observations_possible > 0:
+            print(f"Filtering rate: {observations_filtered/total_observations_possible*100:.2f}%")
 
         # Assign colors and labels through voting
         print("Assigning final colors and labels...")
