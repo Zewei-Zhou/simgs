@@ -1,0 +1,146 @@
+
+# Model Parameters
+model_params: {
+    model_config: {'name': 'GaussianModel', 
+          'kwargs': {
+              'fork': 2, 
+              'gs_attr': '2D', 
+              'color_attr': 'RGB', 
+              'feat_dim': 32, 
+              'view_dim': 3, 
+              'appearance_dim': 0, 
+              'n_offsets': 10, 
+              'voxel_size': 0.001, 
+              'render_mode': 'RGB+ED', 
+              'update_depth': 3,
+              'update_init_factor': 16,
+              'update_hierachy_factor': 4,
+          }
+        },
+    pretrained_checkpoint: '',
+    global_appearance: '',
+    dataset_name: waymo_example,
+    exp_name: 2d_loss_0.1,
+    images: images,
+    depths: depths,
+    masks: masks,
+    resolution: -1,
+    white_background: False,
+    random_background: False,
+    resolution_scales: [1.0],
+    data_device: cuda,
+    eval: True,
+    ratio: 1,
+    data_format: colmap,
+    add_mask: False,
+    add_depth: True,
+    add_sky_mask: True,  # Enable sky mask loading
+    sky_masks: sky_masks,  # Sky masks folder name
+    llffhold: 8,
+    source_path: /data3/zewei/ObjectGS/waymo_example
+}
+
+# Pipeline Parameters
+pipeline_params: {
+    weed_ratio: 0.2,
+    add_prefilter: True,
+    vis_step: 1000,
+    no_prefilter_step: 0,
+    shuffle: True,
+    tile_size: 8
+}
+
+# Optimization Parameters
+optim_params: {
+    iterations: 30_000,
+    position_lr_init: 0.00016,
+    position_lr_final: 0.0000016,
+    position_lr_delay_mult: 0.010000,
+    position_lr_max_steps: 30_000,
+    offset_lr_init: 0.001000,
+    offset_lr_final: 0.000010,
+    offset_lr_delay_mult: 0.010000,
+    offset_lr_max_steps: 30_000,
+    feature_lr: 0.007500,
+    scaling_lr: 0.007000,
+    rotation_lr: 0.002000,
+    mlp_opacity_lr_init: 0.002000,
+    mlp_opacity_lr_final: 0.000020,
+    mlp_opacity_lr_delay_mult: 0.010000,
+    mlp_opacity_lr_max_steps: 30_000,
+    mlp_cov_lr_init: 0.004000,
+    mlp_cov_lr_final: 0.004000,
+    mlp_cov_lr_delay_mult: 0.010000,
+    mlp_cov_lr_max_steps: 30_000,
+    mlp_color_lr_init: 0.008000,
+    mlp_color_lr_final: 0.000050,
+    mlp_color_lr_delay_mult: 0.010000,
+    mlp_color_lr_max_steps: 30_000,
+    appearance_lr_init: 0.000000,
+    appearance_lr_final: 0.000000,
+    appearance_lr_delay_mult: 0.010000,
+    appearance_lr_max_steps: 30_000,
+    lambda_dssim: 0.200000, #0.2
+    lambda_object_loss: 0.010000, # object loss 0.1
+    lambda_zero_penalty: 0.00100, # zero penalty 0
+    lambda_dreg: 0.010000,
+    lambda_sky_opa: 0.05,  # Enhanced sky opacity loss weight
+    lambda_opacity_entropy: 0.0,
+    lambda_normal: 0.050000,
+    normal_start_iter: 7000,
+    lambda_dist: 0.000000,
+    dist_start_iter: 3000,
+    start_stat: 500,
+    update_from: 1500,
+    update_interval: 100,
+    update_until: 15_000,
+    overlap: False,
+    densification: True,
+    growing_type: mean,
+    pruning_type: mean,
+    min_opacity: 0.005000,
+    success_threshold: 0.800000,
+    densify_grad_threshold: 0.00001,
+    update_ratio: 0.200000,
+    extra_ratio: 0.250000,
+    extra_up: 0.050000,
+    start_depth: 500,
+    depth_l1_weight_init: 0.100000,
+    depth_l1_weight_final: 0.010000,
+    # new added
+    object_loss_warmup_iter: 5000,
+    object_loss_params: {
+        enable_class_balancing: true,      # Use weighted CrossEntropyLoss
+        max_class_weight: 10.0,           # Cap maximum class weight
+        enable_progressive_weighting: true, # Gradually increase object loss weight
+        log_interval: 1000,               # Log detailed object loss info every N iterations
+        loss_type: 'focal_loss',       # 'cross_entropy' or 'focal_loss'
+        focal_loss_gamma: 2.0             # Gamma for focal loss
+    },
+
+    # Vid2Sim geometric supervision parameters
+    geo_sup_from_iter: 1000,        # Start geometric supervision from iteration
+    geo_sup_until_iter: 25000,      # End geometric supervision at iteration
+    
+    # NCC-based depth loss
+    use_ncc_depth_loss: True,       # Enable NCC depth loss
+    vid2sim_depth_weight: 0.1,      # Weight for NCC depth loss
+    normal_l1_weight_init: 0.1,     # Initial weight for normal loss scheduling
+    normal_l1_weight_final: 0.01,   # Final weight for normal loss scheduling
+    
+    # Angular normal loss
+    use_angular_normal_loss: True,  # Enable angular normal loss
+    vid2sim_normal_weight: 0.1,     # Weight for angular normal loss
+    
+    # Geometric consistency loss
+    use_geo_consist_loss: True,     # Enable geometric consistency loss
+    vid2sim_geo_weight: 0.1,        # Weight for geometric consistency loss
+    geo_consist_weight_init: 0.1,   # Initial weight for geo consistency scheduling
+    geo_consist_weight_final: 0.01, # Final weight for geo consistency scheduling
+    
+    # Scale loss (Vid2Sim style)
+    lambda_dreg: 0.01,              # Enable minimum scale loss (existing parameter)
+    
+    # Photometric loss (keep existing)
+    lambda_dssim: 0.2              # SSIM weight (existing parameter)
+}

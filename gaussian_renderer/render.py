@@ -220,12 +220,26 @@ def prefilter_voxel(viewpoint_camera, pc):
 
     return visible_mask
 
-def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None, training=True, object_mask=None, sky_model= None):
+def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None, training=True, object_mask=None, sky_model=None):
     """Integrate sky model into rendering pipeline"""
     render_pkg = render(viewpoint_cam, gaussians, pipe, bg_color, visible_mask, training, object_mask)
     if sky_model is not None:
         H, W = viewpoint_cam.image_height, viewpoint_cam.image_width
-        sky_colors = generate_sky_colors(viewpoint_cam, sky_model, H, W, training)
+        # Get image index for appearance embedding with safety check
+        img_idx = None
+        if hasattr(viewpoint_cam, 'uid'):
+            uid = viewpoint_cam.uid
+            
+            # Safety check: ensure uid is within valid range
+            if hasattr(sky_model, 'appearance_embedding'):
+                max_idx = sky_model.appearance_embedding.num_embeddings
+                if uid >= max_idx:
+                    print(f"[WARNING] Camera uid={uid} exceeds max_idx={max_idx}, clamping to {max_idx-1} (image: {viewpoint_cam.image_name})")
+                    uid = max_idx - 1
+            
+            img_idx = torch.tensor([uid], dtype=torch.long, device="cuda")
+        
+        sky_colors = generate_sky_colors(viewpoint_cam, sky_model, H, W, training, img_idx)
         rendered_image = render_pkg["render"]
         rendered_opacity = render_pkg["render_alphas"]  # [1, H, W] from render function
         T_bg = (1.0 - rendered_opacity).clamp(0.0, 1.0)  # [1, H, W]
@@ -234,6 +248,14 @@ def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None,
 
         if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
             sky_mask = viewpoint_cam.sky_mask.float().to(T_bg.device)  # Original sky mask [1, H, W] - ensure same device as T_bg
+            
+            # Debug: Print sky mask info
+            # if training and torch.rand(1).item() < 0.01:  # Print 1% of the time during training
+            #     sky_ratio = sky_mask.sum() / sky_mask.numel()
+            #     print(f"[DEBUG render_with_sky] Camera {viewpoint_cam.uid if hasattr(viewpoint_cam, 'uid') else 'unknown'}")
+            #     print(f"  sky_mask shape: {sky_mask.shape}, sky ratio: {sky_ratio:.3f}")
+            #     print(f"  sky_mask range: [{sky_mask.min():.3f}, {sky_mask.max():.3f}]")
+            
             sky_mask_4d = sky_mask.unsqueeze(0)  # [1, 1, H, W]
             inv = 1.0 - sky_mask_4d  # [1, 1, H, W]
             inv_eroded = F.max_pool2d(inv, kernel_size=5, stride=1, padding=2)
@@ -242,18 +264,37 @@ def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None,
 
         else:
             # Fallback: use opacity-based sky detection
+            # if training and torch.rand(1).item() < 0.01:
+            #     print(f"[DEBUG render_with_sky] No sky_mask available for camera {viewpoint_cam.uid if hasattr(viewpoint_cam, 'uid') else 'unknown'}, using opacity-based detection")
             tau, sharp = 0.2, 10.0                                      
             sky_mask_soft = torch.sigmoid((T_bg - tau) * sharp)  # Same shape as T_bg
         
-        gate = T_bg * sky_mask_soft
-        final_image = rendered_image + gate * sky_colors
+        gate = T_bg * sky_mask_soft  # [1, H, W]
+        
+        # Composite: rendered_image + gate * sky_colors
+        # sky_colors is [3, H, W], gate is [1, H, W]
+        sky_contribution = T_bg * sky_colors  # [3, H, W]
+        final_image = rendered_image + sky_contribution
+        
+        # Clamp to valid range BEFORE any debug output or return
+        final_image = torch.clamp(final_image, 0.0, 1.0)
+
         render_pkg["render"] = final_image
         render_pkg["sky_colors"] = sky_colors
+        render_pkg["T_bg"] = T_bg
+        render_pkg["gate"] = gate
     return render_pkg
 
-def generate_sky_colors(viewpoint_cam, sky_model, H, W, training):
-    """render sky colors for given pixels"""
-
+def generate_sky_colors(viewpoint_cam, sky_model, H, W, training, img_idx=None):
+    """render sky colors for given pixels
+    
+    Args:
+        viewpoint_cam: Camera viewpoint
+        sky_model: Sky model to use for rendering
+        H, W: Image height and width
+        training: Whether in training mode
+        img_idx: Image index for appearance embedding (optional)
+    """
     i, j = torch.meshgrid(
         torch.arange(W, dtype=torch.float32, device="cuda"),
         torch.arange(H, dtype=torch.float32, device="cuda"),
@@ -276,7 +317,13 @@ def generate_sky_colors(viewpoint_cam, sky_model, H, W, training):
     directions_world = directions_world.contiguous()
     
     try:
-        sky_colors = sky_model(directions_world)  # [H, W, 3]
+        # Pass img_idx to sky_model for per-image appearance embedding
+        if img_idx is not None:
+            # Expand img_idx to match the spatial dimensions [H, W]
+            img_idx_expanded = img_idx.expand(H, W)
+            sky_colors = sky_model(directions_world, img_idx_expanded)  # [H, W, 3]
+        else:
+            sky_colors = sky_model(directions_world)  # [H, W, 3]
     except Exception as e:
         print(f"Warning: Sky model forward pass failed ({e}), using fallback")
         # Use the same device as directions_world for fallback

@@ -20,7 +20,7 @@ datasets/*
 comparison_results
 Grounded-SAM-2
 output*
-waymo_example*
+/waymo_example
 # *.sh
 demo
 mesh

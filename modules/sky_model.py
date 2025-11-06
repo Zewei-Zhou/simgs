@@ -105,6 +105,17 @@ class SkyModel(nn.Module):
             hidden_dims=head_mlp_layer_width,
             skip_connections=[1],
         )
+        
+        # Better initialization: bias towards light blue sky
+        # This ensures the model starts with reasonable sky colors
+        with torch.no_grad():
+            if len(self.sky_head.layers) > 0 and hasattr(self.sky_head.layers[-1], 'bias'):
+                # Set bias to produce light blue color after sigmoid
+                # sigmoid(0) = 0.5, sigmoid(0.5) ≈ 0.62, sigmoid(1.0) ≈ 0.73, sigmoid(2.0) ≈ 0.88
+                self.sky_head.layers[-1].bias[0] = 0.0   # R: sigmoid(0) ≈ 0.50
+                self.sky_head.layers[-1].bias[1] = 0.5   # G: sigmoid(0.5) ≈ 0.62  
+                self.sky_head.layers[-1].bias[2] = 2.0   # B: sigmoid(2.0) ≈ 0.88
+        
         self.in_test_set = False
         
         # Move all components to the specified device

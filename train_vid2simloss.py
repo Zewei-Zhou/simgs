@@ -136,11 +136,19 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         gaussians.restore(model_params, opt)
     # -----------------------Sky Model Integration-----------------------------------
     # Extract the number of images from the dataset configuration
-    n_images = len(dataset.images) if hasattr(dataset, 'images') else 0
+    train_cameras = scene.getTrainCameras()
+    n_images = len(train_cameras)
+    max_uid = max([cam.uid for cam in train_cameras]) + 1  # +1 because UIDs are 0-indexed
+    
+    # Use the maximum value to ensure all UIDs are valid indices
+    n_embeddings = max(n_images, max_uid)
+    
+    print(f"[DEBUG Sky Model Init] n_cameras={n_images}, max_uid={max_uid-1}, n_embeddings={n_embeddings}")
+    
     # simple sky model
     sky_model = create_sky_model(
         model_type="neural",
-        n_images=n_images,  # Number of images in the dataset
+        n_images=n_embeddings,  # Use n_embeddings to accommodate all camera UIDs
         head_mlp_layer_width=64,  # Default MLP layer width
         enable_appearance_embedding=True,  # Enable appearance embedding
         appearance_embedding_dim=16,  # Default embedding dimension
@@ -158,7 +166,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         "regularization_weight": 0.01
     })
     sky_params = sky_model.get_param_groups()
-    optimizer_sky = torch.optim.Adam([{'params': list(sky_model.parameters()), 'lr': 0.001, 'name': 'sky_model'}])
+    # Use higher learning rate for sky model to ensure it learns quickly
+    optimizer_sky = torch.optim.Adam([{'params': list(sky_model.parameters()), 'lr': 0.005, 'name': 'sky_model'}])
     # -------------------------------------------------------------------------------
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -224,15 +233,20 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         else:
             validity_mask = torch.ones_like(alpha_mask)
         final_loss_mask = alpha_mask * validity_mask
-        image = image * final_loss_mask
-        gt_image = gt_image * final_loss_mask
+        
+        # Get sky mask for sky region loss
+        has_sky_mask = hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None
+        if has_sky_mask:
+            sky_mask = viewpoint_cam.sky_mask.cuda()  # 1 for sky, 0 for non-sky
+        else:
+            sky_mask = torch.zeros_like(alpha_mask)
 
         losses = dict()
 
-        # Photometric loss (Vid2Sim style)
+        # Photometric loss - separate for foreground and sky
         gt_mask = alpha_mask.float()  # Use alpha mask as ground truth mask
         
-        # Apply mask to images
+        # Foreground loss (masked region)
         masked_image = image * gt_mask
         masked_gt_image = gt_image * gt_mask
         
@@ -245,6 +259,18 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             ssim_loss = (1.0 - ssim(masked_image, masked_gt_image))
             
         losses["image_loss"] = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
+        
+        # Sky loss - only compute if we have sky mask and sky regions exist
+        if has_sky_mask and sky_mask.sum() > 100:  # At least 100 sky pixels
+            # Sky region: where sky_mask=1 and alpha_mask=0 (background)
+            sky_region_mask = sky_mask * (1.0 - alpha_mask) * validity_mask
+            if sky_region_mask.sum() > 100:
+                sky_image = image * sky_region_mask
+                sky_gt_image = gt_image * sky_region_mask
+                sky_l1 = l1_loss(sky_image, sky_gt_image)
+                # Weight sky loss lower than foreground initially
+                sky_loss_weight = getattr(opt, 'lambda_sky_recon', 0.5)
+                losses["sky_recon_loss"] = sky_loss_weight * sky_l1
 
         # Scaling loss (Vid2Sim style)
         if opt.lambda_dreg > 0:
@@ -427,9 +453,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         #-------------------------------------------------------------
         #--------------sky loss (original, to be checked)---------------
         if opt.lambda_sky_opa > 0 and hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
+            # sky_mask is already on cuda from line 239
             sky_losses = sky_loss_manager.compute_losses(
                 pred_opacity=render_pkg["render_alphas"],
-                sky_masks=viewpoint_cam.sky_mask.squeeze().cuda(),
+                sky_masks=sky_mask.squeeze(),
                 alpha_masks=alpha_mask.squeeze(),
                 validity_mask=validity_mask.squeeze()
             )
@@ -620,7 +647,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     from gaussian_renderer.render import prefilter_voxel
                     visible_mask = prefilter_voxel(viewpoint_cam, gaussians).squeeze() if pipe.add_prefilter else gaussians._anchor_mask    
 
-                vis_render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask)
+                vis_render_pkg = getattr(modules, 'render_with_sky')(viewpoint_cam, gaussians, pipe, scene.background, visible_mask, sky_model = sky_model)
                 vis_image, alpha = vis_render_pkg["render"], vis_render_pkg["render_alphas"]
                 gt_image = viewpoint_cam.original_image.cuda()
                 alpha_mask = viewpoint_cam.alpha_mask.cuda()
@@ -651,7 +678,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 vis_path = os.path.join(scene.model_path, "vis")
                 os.makedirs(vis_path, exist_ok=True)
                 torchvision.utils.save_image(grid, os.path.join(vis_path, f"{iteration:05d}_{viewpoint_cam.colmap_id:03d}.png"))
-            
+
+
             # densification
             if iteration < opt.update_until and iteration > opt.start_stat:
                 # add statis
