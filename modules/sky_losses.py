@@ -211,7 +211,18 @@ class SkyLossManager:
         """
         losses: Dict[str, torch.Tensor] = {}
         device = pred_opacity.device
-        
+
+        if alpha_masks is not None:
+            alpha_masks_float = alpha_masks.float().to(device)
+            if alpha_masks_float.dim() == 2:
+                alpha_masks_float = alpha_masks_float.unsqueeze(0).unsqueeze(-1)  # (1,H,W,1)
+            elif alpha_masks_float.dim() == 3:
+                alpha_masks_float = alpha_masks_float.unsqueeze(-1)  # (B,H,W,1)
+            background_mask = (1.0 - alpha_masks_float)
+        else:
+            background_mask = torch.ones(pred_opacity.shape[0], pred_opacity.shape[1], pred_opacity.shape[2], 1, device=device)
+
+
         # Ensure validity_mask is on the correct device and adjust dimensions
         if validity_mask is not None:
             validity_mask = validity_mask.to(device)
@@ -224,7 +235,8 @@ class SkyLossManager:
                 else:  # (C,H,W) - take first channel or mean
                     validity_mask = validity_mask[0:1].unsqueeze(-1)  # (1,H,W,1)
             # If already 4D, keep as is
-            
+        final_region_mask = background_mask * validity_mask
+
         # Handle different input dimensions for sky_masks
         if sky_masks.dim() == 2:  # (H,W)
             sky_masks = sky_masks.unsqueeze(0).unsqueeze(-1)  # (1,H,W,1)
@@ -252,7 +264,7 @@ class SkyLossManager:
             sky_masks=sky_core,  # Target is sky_core
             loss_type=self.opacity_loss_type,
             limit=self.safe_limit,
-            validity_mask=validity_mask  # Pass the validity mask
+            validity_mask=final_region_mask  # Pass the validity mask
         )
         
         loss_border = sky_opacity_loss(
@@ -260,14 +272,14 @@ class SkyLossManager:
             sky_masks=sky_border, # Target is sky_border
             loss_type=self.opacity_loss_type,
             limit=self.safe_limit,
-            validity_mask=validity_mask  # Pass the validity mask
+            validity_mask=final_region_mask  # Pass the validity mask
         ) * self.border_weight
 
         # For non-sky loss, the region is `non_sky`
         final_nonsky_mask = non_sky
-        if validity_mask is not None:
+        if final_region_mask is not None:
             # validity_mask is already 4D at this point
-            final_nonsky_mask = final_nonsky_mask * validity_mask
+            final_nonsky_mask = final_nonsky_mask * final_region_mask
 
         loss_nonsky_opaque = safe_binary_cross_entropy(
             pred=1.0 - T_bg,  # Predict 1 (opaque)
@@ -288,7 +300,7 @@ class SkyLossManager:
             reg_loss = sky_regularization_loss(
                 pred_opacity, 
                 alpha_masks, 
-                validity_mask=validity_mask # Pass the validity mask
+                validity_mask=final_region_mask # Pass the validity mask
             )
             losses["sky_regularization_loss"] = self.regularization_weight * reg_loss
             

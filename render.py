@@ -32,7 +32,7 @@ from utils.general_utils import safe_state, parse_cfg, visualize_depth, visualiz
 from utils.image_utils import save_rgba, save_mask
 from argparse import ArgumentParser
 
-def render_set(model_path, name, iteration, views, gaussians, pipe, background):
+def render_set(model_path, name, iteration, views, gaussians, pipe, background, sky_model=None):
     vis_normal=False
     vis_depth=False
     vis_semantic=True
@@ -70,7 +70,11 @@ def render_set(model_path, name, iteration, views, gaussians, pipe, background):
     for idx, view in enumerate(tqdm(views, desc="rendering progress")):
         
         torch.cuda.synchronize();t_start = time.time()
-        render_pkg = getattr(modules, 'render')(view, gaussians, pipe, background)
+        # Use render_with_sky if sky_model is provided, otherwise use regular render
+        if sky_model is not None:
+            render_pkg = getattr(modules, 'render_with_sky')(view, gaussians, pipe, background, sky_model=sky_model, training=False)
+        else:
+            render_pkg = getattr(modules, 'render')(view, gaussians, pipe, background)
         torch.cuda.synchronize();t_end = time.time()
 
         t_list.append(t_end - t_start)
@@ -139,14 +143,40 @@ def render_sets(dataset, opt, pipe, iteration, skip_train, skip_test, explicit=N
         scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, explicit=explicit, logger=logger)
         gaussians.eval()
 
+        # Create sky model for test rendering
+        from modules.sky_model import create_sky_model
+        train_cameras = scene.getTrainCameras()
+        n_images = len(train_cameras)
+        max_uid = max([cam.uid for cam in train_cameras]) + 1
+        n_embeddings = max(n_images, max_uid)
+        
+        sky_model = create_sky_model(
+            model_type="neural",
+            n_images=n_embeddings,
+            head_mlp_layer_width=64,
+            enable_appearance_embedding=True,
+            appearance_embedding_dim=16,
+            device=torch.device("cuda")
+        )
+        
+        # Load sky model weights if available
+        sky_model_path = os.path.join(dataset.model_path, f"sky_model_{scene.loaded_iter}.pth")
+        if os.path.exists(sky_model_path):
+            sky_model.load_state_dict(torch.load(sky_model_path))
+            print(f"Loaded sky model from {sky_model_path}")
+        else:
+            print(f"Warning: Sky model weights not found at {sky_model_path}, using initialized weights")
+        
+        sky_model.eval()
+
         if not os.path.exists(dataset.model_path):
             os.makedirs(dataset.model_path)
         
         if not skip_train:
-            visible_count = render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background)
+            visible_count = render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipe, scene.background, sky_model=sky_model)
 
         if not skip_test:
-            visible_count = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background)
+            visible_count = render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, pipe, scene.background, sky_model=sky_model)
 
     return visible_count
 

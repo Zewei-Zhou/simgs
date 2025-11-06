@@ -630,11 +630,15 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, getattr(modules, 'render_with_sky'), (pipe, scene.background), wandb, logger)
+            training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, getattr(modules, 'render_with_sky'), (pipe, scene.background), wandb, logger, sky_model)
             
             if (iteration in saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+                # Save sky model
+                sky_model_path = os.path.join(scene.model_path, f"sky_model_{iteration}.pth")
+                torch.save(sky_model.state_dict(), sky_model_path)
+                logger.info(f"[ITER {iteration}] Saved sky model to {sky_model_path}")
 
             if iteration % pipe.vis_step == 0 or iteration == 1 or (iteration % 100 == 0 and iteration < 1000):
                 viewpoint_cam = scene.getTrainCameras().copy()[10]
@@ -714,6 +718,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             if (iteration in checkpoint_iterations):
                 logger.info("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                # Save sky model checkpoint
+                sky_model_path = os.path.join(scene.model_path, f"sky_model_chkpnt{iteration}.pth")
+                torch.save(sky_model.state_dict(), sky_model_path)
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -737,7 +744,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, wandb=None, logger=None):
+def training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, wandb=None, logger=None, sky_model=None):
     if tb_writer:
         for key, value in losses.items():
             tb_writer.add_scalar(f'{dataset_name}/train_loss_patches/{key}', value, iteration)
@@ -769,7 +776,11 @@ def training_report(tb_writer, dataset_name, iteration, losses, total_loss, l1_l
 
                 for idx, viewpoint in enumerate(config['cameras']):
                     
-                    image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+                    # Render with sky model if available
+                    if sky_model is not None:
+                        image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, sky_model=sky_model, training=False)["render"], 0.0, 1.0)
+                    else:
+                        image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
                     alpha_mask = viewpoint.alpha_mask.cuda()
                     if hasattr(viewpoint, 'validity_mask') and viewpoint.validity_mask is not None:

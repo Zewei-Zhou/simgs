@@ -249,31 +249,19 @@ def render_with_sky(viewpoint_cam, gaussians, pipe, bg_color, visible_mask=None,
         if hasattr(viewpoint_cam, 'sky_mask') and viewpoint_cam.sky_mask is not None:
             sky_mask = viewpoint_cam.sky_mask.float().to(T_bg.device)  # Original sky mask [1, H, W] - ensure same device as T_bg
             
-            # Debug: Print sky mask info
-            # if training and torch.rand(1).item() < 0.01:  # Print 1% of the time during training
-            #     sky_ratio = sky_mask.sum() / sky_mask.numel()
-            #     print(f"[DEBUG render_with_sky] Camera {viewpoint_cam.uid if hasattr(viewpoint_cam, 'uid') else 'unknown'}")
-            #     print(f"  sky_mask shape: {sky_mask.shape}, sky ratio: {sky_ratio:.3f}")
-            #     print(f"  sky_mask range: [{sky_mask.min():.3f}, {sky_mask.max():.3f}]")
-            
+            # Erode sky mask to avoid edge bleeding
             sky_mask_4d = sky_mask.unsqueeze(0)  # [1, 1, H, W]
-            inv = 1.0 - sky_mask_4d  # [1, 1, H, W]
-            inv_eroded = F.max_pool2d(inv, kernel_size=5, stride=1, padding=2)
-            sky_mask_eroded = 1.0 - inv_eroded  # [1, 1, H, W]
-            sky_mask_soft = sky_mask_eroded.squeeze(0)  # [1, H, W] - same shape as T_bg
+            sky_mask_eroded = -F.max_pool2d(-sky_mask_4d, kernel_size=3, stride=1, padding=1)
+            sky_mask_soft = sky_mask_eroded.squeeze(0)  # [1, H, W]
+            sky_mask_soft = torch.clamp((sky_mask_soft - 0.9) * 10.0, 0.0, 1.0)
 
         else:
             # Fallback: use opacity-based sky detection
-            # if training and torch.rand(1).item() < 0.01:
-            #     print(f"[DEBUG render_with_sky] No sky_mask available for camera {viewpoint_cam.uid if hasattr(viewpoint_cam, 'uid') else 'unknown'}, using opacity-based detection")
             tau, sharp = 0.2, 10.0                                      
             sky_mask_soft = torch.sigmoid((T_bg - tau) * sharp)  # Same shape as T_bg
         
         gate = T_bg * sky_mask_soft  # [1, H, W]
-        
-        # Composite: rendered_image + gate * sky_colors
-        # sky_colors is [3, H, W], gate is [1, H, W]
-        sky_contribution = T_bg * sky_colors  # [3, H, W]
+        sky_contribution = gate * sky_colors  # [3, H, W]
         final_image = rendered_image + sky_contribution
         
         # Clamp to valid range BEFORE any debug output or return
